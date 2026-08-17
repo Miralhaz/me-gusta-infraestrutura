@@ -1,0 +1,22 @@
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    ports:
+      - "4566:4566"           
+      - "4510-4559:4510-4559" # Faixa de portas para alguns serviços na parte de SERVICES=
+    environment:
+      - SERVICES=s3,rds,ec2,elb,efs,iam,sts,logs
+      - DEBUG=1
+      - PERSISTENCE=1
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN} # Colocar no .env para ser configurado como variável de ambiente
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "./volume:/var/lib/localstack"
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - localstack-net
+
+networks:
+  localstack-net:
+    driver: bridge
