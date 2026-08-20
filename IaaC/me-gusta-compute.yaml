@@ -1,0 +1,333 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  MeGusta - Ambito da Computacao (Key Pair, EFS + Mount Targets, EC2 (6 instancias),
+  Elastic IP do Bastion Host, ALB + Target Group + Listener, RDS Subnet Group + RDS MySQL Multi-AZ).
+  Recursos do ambito de rede (VPC, Subnets, IGW, NAT, Route Tables, Security Groups) sao
+  referenciados via Parameters, pois pertencem a outro template/stack.
+
+Parameters:
+
+  # ---------- Rede: nome da stack criada a partir de megusta-rede.yaml ----------
+  # Este e o UNICO parametro de rede agora. Todo o resto (VPC, Subnets,
+  # Security Groups) e importado direto da stack de rede via Fn::ImportValue,
+  # usando os exports "${NetworkStackName}-<Recurso>" definidos nos Outputs
+  # do megusta-rede.yaml. Precisa bater com o Stack Name usado no deploy da
+  # rede (ex.: se a stack de rede se chama "megusta-rede", os exports saem
+  # como "megusta-rede-VpcId", "megusta-rede-WebServerSecurityGroupId" etc).
+  NetworkStackName:
+    Type: String
+    Default: megusta-rede
+    Description: >
+      Nome (Stack Name) da stack criada a partir do template megusta-rede.yaml.
+
+  # ---------- Parametros proprios do ambito computacional ----------
+  KeyPairName:
+    Type: String
+    Default: megusta-prod-us1-key
+    Description: Nome do Key Pair EC2 a ser criado.
+
+  WebServerAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI utilizada para as instancias de Web Server (React/Node).
+
+  BackEndAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI utilizada para a instancia de Back-End (Spring Boot / Docker).
+
+  BastionAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI utilizada para o Bastion Host.
+
+  WebServerInstanceType:
+    Type: String
+    Default: t3.micro
+    Description: Tipo de instancia para os Web Servers.
+
+  BackEndInstanceType:
+    Type: String
+    Default: t3.small
+    Description: Tipo de instancia para o Back-End (Docker/Spring Boot).
+
+  BastionInstanceType:
+    Type: String
+    Default: t3.micro
+    Description: Tipo de instancia para o Bastion Host.
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    Description: Classe de instancia do RDS MySQL.
+
+  DBName:
+    Type: String
+    Default: megustadb
+    Description: Nome inicial do banco de dados MySQL.
+
+  DBMasterUsername:
+    Type: String
+    Default: admin
+    Description: Usuario master do RDS MySQL.
+
+  DBMasterUserPassword:
+    Type: String
+    NoEcho: true
+    Description: Senha do usuario master do RDS MySQL (minimo 8 caracteres).
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+    Description: Armazenamento alocado (GB) para o RDS MySQL.
+
+
+
+Resources:
+
+  # ---------- Key Pair ----------
+  MeGustaKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Ref KeyPairName
+      KeyType: rsa
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-keypair
+
+  # ---------- EFS ----------
+  MeGustaEFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Name
+          Value: megusta-prod-us1-efs
+
+  EFSMountTargetWebA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref MeGustaEFSFileSystem
+      SubnetId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPrivadaWebAId'
+      SecurityGroups:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-WebServerSecurityGroupId'
+
+  EFSMountTargetWebB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref MeGustaEFSFileSystem
+      SubnetId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPrivadaWebBId'
+      SecurityGroups:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-WebServerSecurityGroupId'
+
+  # ---------- EC2: Bastion Host ----------
+  BastionHostInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref BastionAmiId
+      InstanceType: !Ref BastionInstanceType
+      KeyName: !Ref MeGustaKeyPair
+      SubnetId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPublicaAId'
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-BastionHostSecurityGroupId'
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-bastion-host
+
+  BastionHostElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref BastionHostInstance
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-bastion-eip
+
+  # ---------- EC2: Web Servers (React) - Sub-rede privada 10.0.0.160/27 (us-east-1b) ----------
+  WebServerInstance1B:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WebServerAmiId
+      InstanceType: !Ref WebServerInstanceType
+      KeyName: !Ref MeGustaKeyPair
+      SubnetId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPrivadaWebBId'
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-WebServerSecurityGroupId'
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-web-1b-1
+
+  WebServerInstance1B2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WebServerAmiId
+      InstanceType: !Ref WebServerInstanceType
+      KeyName: !Ref MeGustaKeyPair
+      SubnetId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPrivadaWebBId'
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-WebServerSecurityGroupId'
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-web-1b-2
+
+  # ---------- EC2: Web Servers (React) - Sub-rede privada 10.0.128.64/27 (us-east-1a) ----------
+  WebServerInstance1A:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WebServerAmiId
+      InstanceType: !Ref WebServerInstanceType
+      KeyName: !Ref MeGustaKeyPair
+      SubnetId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPrivadaWebAId'
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-WebServerSecurityGroupId'
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-web-1a-1
+
+  WebServerInstance1A2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WebServerAmiId
+      InstanceType: !Ref WebServerInstanceType
+      KeyName: !Ref MeGustaKeyPair
+      SubnetId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPrivadaWebAId'
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-WebServerSecurityGroupId'
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-web-1a-2
+
+  # ---------- EC2: Back-End (Docker/Spring Boot) - Sub-rede privada 10.0.0.192/27 ----------
+  BackEndInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref BackEndAmiId
+      InstanceType: !Ref BackEndInstanceType
+      KeyName: !Ref MeGustaKeyPair
+      SubnetId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPrivadaBackendId'
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-BackEndSecurityGroupId'
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-backend
+
+  # ---------- Application Load Balancer ----------
+  MeGustaALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: megusta-prod-us1-alb
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-ALBSecurityGroupId'
+      Subnets:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPublicaAId'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPublicaBId'
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-alb
+
+  MeGustaTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: megusta-prod-us1-tg
+      Protocol: HTTP
+      Port: 80
+      VpcId:
+        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !Ref WebServerInstance1B
+        - Id: !Ref WebServerInstance1B2
+        - Id: !Ref WebServerInstance1A
+        - Id: !Ref WebServerInstance1A2
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-tg
+
+  MeGustaListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref MeGustaALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MeGustaTargetGroup
+
+  # ---------- RDS Subnet Group ----------
+  MeGustaDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: megusta-prod-us1-db-subnet-group
+      DBSubnetGroupDescription: Subnet group para o RDS MySQL Multi-AZ do MeGusta
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPrivadaDatabaseAId'
+        - Fn::ImportValue: !Sub '${NetworkStackName}-SubnetPrivadaDatabaseBId'
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-db-subnet-group
+
+  # ---------- RDS MySQL Multi-AZ ----------
+  MeGustaRDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: megusta-prod-us1-rds
+      Engine: mysql
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterUserPassword
+      MultiAZ: true
+      DBSubnetGroupName: !Ref MeGustaDBSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub '${NetworkStackName}-DatabaseSecurityGroupId'
+      StorageType: gp3
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      Tags:
+        - Key: Name
+          Value: megusta-prod-us1-rds
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+Outputs:
+  KeyPairName:
+    Description: Nome do Key Pair criado
+    Value: !Ref MeGustaKeyPair
+
+  EFSFileSystemId:
+    Description: ID do sistema de arquivos EFS
+    Value: !Ref MeGustaEFSFileSystem
+
+  BastionHostPublicIP:
+    Description: Elastic IP do Bastion Host
+    Value: !Ref BastionHostElasticIP
+
+  ALBDNSName:
+    Description: DNS Name do Application Load Balancer
+    Value: !GetAtt MeGustaALB.DNSName
+
+  RDSEndpoint:
+    Description: Endpoint do RDS MySQL
+    Value: !GetAtt MeGustaRDSInstance.Endpoint.Address
