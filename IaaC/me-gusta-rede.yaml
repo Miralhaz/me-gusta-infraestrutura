@@ -1,0 +1,524 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  Template de rede (VPC, Subnets, Internet Gateway, NAT Gateway, Route Tables
+  e Security Groups) - versão simplificada para estudo.
+
+Parameters:
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/24
+    Description: Faixa de IPs da VPC.
+
+  AZ1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1a
+    Description: Primeira Zona de Disponibilidade.
+
+  AZ2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1b
+    Description: Segunda Zona de Disponibilidade.
+
+  BastionAllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: IP (ou faixa de IPs) liberado para acessar o Bastion Host via SSH. Ex. "meu-ip/32". # NÂO SEI SE FAZ SENTIDO
+
+Resources:
+
+  # ============================================================================
+  # 1) VPC - a rede privada onde tudo vai morar
+  # ============================================================================
+  # CidrBlock 10.0.0.0/24 significa: essa rede tem 256 endereços de IP
+  # possíveis, de 10.0.0.0 até 10.0.0.255.
+  MinhaVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: minha-vpc
+
+  # ============================================================================
+  # 2) INTERNET GATEWAY - a porta de saida para a internet
+  # ============================================================================
+  # Sozinho ele não faz nada: precisa ser "encaixado" (attached) na VPC.
+  MeuInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: meu-internet-gateway
+
+  AnexarInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MinhaVPC
+      InternetGatewayId: !Ref MeuInternetGateway
+
+  # ============================================================================
+  # 3) SUBNETS - as "salas" dentro da VPC
+  # ============================================================================
+  # Uma subnet publica é aquela que tem rota direta para o Internet Gateway
+  # (então recursos nela podem ser acessados pela internet).
+  # Uma subnet PRIVADA não tem essa rota direta: ela fica "escondida",
+  # e só consegue SAIR para a internet através do NAT Gateway.
+  #
+  # Usamos 2 Zonas de Disponibilidade (AZs) diferentes (us-east-1a e
+  # us-east-1b) para ter redundância: se uma AZ tiver problema, a outra
+  # continua funcionando.
+
+  # --- Subnets publicas ---
+  SubnetPublicaA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MinhaVPC
+      AvailabilityZone: !Ref AZ1
+      CidrBlock: 10.0.0.0/26
+      MapPublicIpOnLaunch: true   # recursos aqui já nascem com IP público
+      Tags:
+        - Key: Name
+          Value: subnet-publica-us-east-1a
+
+  SubnetPublicaB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MinhaVPC
+      AvailabilityZone: !Ref AZ2
+      CidrBlock: 10.0.0.64/26
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: subnet-publica-us-east-1b
+
+  # --- Subnets privadas: camada Web (onde ficam os servidores da aplicação) ---
+  SubnetPrivadaWebA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MinhaVPC
+      AvailabilityZone: !Ref AZ1
+      CidrBlock: 10.0.0.128/27
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: subnet-privada-web-us-east-1a
+
+  SubnetPrivadaWebB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MinhaVPC
+      AvailabilityZone: !Ref AZ2
+      CidrBlock: 10.0.0.160/27
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: subnet-privada-web-us-east-1b
+
+  # --- Subnet privada: camada Back-End ---
+  SubnetPrivadaBackend:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MinhaVPC
+      AvailabilityZone: !Ref AZ1
+      CidrBlock: 10.0.0.192/27
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: subnet-privada-backend-us-east-1a
+
+  # --- Subnet privada: camada Database ---
+  # Duas subnets em AZs diferentes, pois o RDS Multi-AZ exige um DBSubnetGroup
+  # com pelo menos duas Zonas de Disponibilidade.
+  # OBS: a VPC 10.0.0.0/24 já estava totalmente dividida em blocos /27 (256
+  # IPs / 32 = 8 blocos, todos ocupados). Por isso o antigo bloco /27 da
+  # Database (10.0.0.224/27) foi dividido em dois /28 (16 IPs cada, de sobra
+  # para instâncias RDS) para caber a segunda AZ sem colidir com nada.
+  SubnetPrivadaDatabase:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MinhaVPC
+      AvailabilityZone: !Ref AZ1
+      CidrBlock: 10.0.0.224/28
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: subnet-privada-database-us-east-1a
+
+  SubnetPrivadaDatabaseB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MinhaVPC
+      AvailabilityZone: !Ref AZ2
+      CidrBlock: 10.0.0.240/28
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: subnet-privada-database-us-east-1b
+
+  # ============================================================================
+  # 4) NAT GATEWAY + ELASTIC IP
+  # ============================================================================
+  # O NAT Gateway precisa de um IP fixo (Elastic IP) para funcionar, e ele
+  # sempre fica dentro de uma subnet publica (aqui colocamos junto com a
+  # subnet publica da AZ us-east-1a).
+  MeuElasticIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AnexarInternetGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: meu-nat-eip
+
+  MeuNatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt MeuElasticIP.AllocationId
+      SubnetId: !Ref SubnetPublicaA
+      Tags:
+        - Key: Name
+          Value: meu-nat-gateway
+
+  # ============================================================================
+  # 5) ROUTE TABLES - as "placas de trânsito" da rede
+  # ============================================================================
+
+  # --- Route Table publica: manda tudo (0.0.0.0/0) para o Internet Gateway ---
+  RouteTablePublica:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MinhaVPC
+      Tags:
+        - Key: Name
+          Value: route-table-publica
+
+  RotaParaInternet:
+    Type: AWS::EC2::Route
+    DependsOn: AnexarInternetGateway
+    Properties:
+      RouteTableId: !Ref RouteTablePublica
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref MeuInternetGateway
+
+  # Aqui "conectamos" cada subnet publica nessa tabela de rotas
+  AssociarSubnetPublicaA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPublicaA
+      RouteTableId: !Ref RouteTablePublica
+
+  AssociarSubnetPublicaB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPublicaB
+      RouteTableId: !Ref RouteTablePublica
+
+  # --- Route Table PRIVADA: manda tudo (0.0.0.0/0) para o NAT Gateway ---
+  RouteTablePrivada:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MinhaVPC
+      Tags:
+        - Key: Name
+          Value: route-table-privada
+
+  RotaParaNat:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTablePrivada
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref MeuNatGateway
+
+  # Conectamos cada subnet privada nessa tabela de rotas
+  AssociarSubnetPrivadaWebA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivadaWebA
+      RouteTableId: !Ref RouteTablePrivada
+
+  AssociarSubnetPrivadaWebB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivadaWebB
+      RouteTableId: !Ref RouteTablePrivada
+
+  AssociarSubnetPrivadaBackend:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivadaBackend
+      RouteTableId: !Ref RouteTablePrivada
+
+  AssociarSubnetPrivadaDatabase:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivadaDatabase
+      RouteTableId: !Ref RouteTablePrivada
+
+  AssociarSubnetPrivadaDatabaseB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivadaDatabaseB
+      RouteTableId: !Ref RouteTablePrivada
+
+  # ============================================================================
+  # 6) SECURITY GROUPS - os "seguranças" de cada camada
+  # ============================================================================
+  # Regra de ouro: cada Security Group só libera a porta que realmente precisa,
+  # e só para quem realmente precisa (nunca "libera tudo para todo mundo").
+
+  # --- Segurança do Bastion Host (a "porta de entrada" para administradores) ---
+  BastionHostSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: bastionhost-sg
+      GroupDescription: Libera acesso SSH (porta 22) vindo da internet para o Bastion Host.
+      VpcId: !Ref MinhaVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref BastionAllowedCidr
+          Description: Acesso SSH (defina o parametro BastionAllowedCidr com o seu IP em producao)
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Libera toda saida
+      Tags:
+        - Key: Name
+          Value: bastionhost-sg
+
+  # --- Segurança do Application Load Balancer ---
+  ALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: alb-sg
+      GroupDescription: Libera HTTP/HTTPS vindo da internet para o Application Load Balancer.
+      VpcId: !Ref MinhaVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP vindo da internet
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS vindo da internet
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Libera toda saida
+      Tags:
+        - Key: Name
+          Value: alb-sg
+
+  # --- Segurança dos servidores Web ---
+  WebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: webserver-sg
+      GroupDescription: Libera HTTP/HTTPS de dentro da VPC e SSH vindo apenas do Bastion.
+      VpcId: !Ref MinhaVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref VpcCidr
+          Description: HTTP vindo de dentro da VPC (ex. do ALB)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS vindo de dentro da VPC (ex. do ALB)
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref BastionHostSG
+          Description: SSH somente a partir do Bastion Host
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Libera toda saida
+      Tags:
+        - Key: Name
+          Value: webserver-sg
+
+  # --- Segurança do Back-End ---
+  BackendSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: backend-sg
+      GroupDescription: Libera a porta da API apenas para quem vem do Web Server, e SSH do Bastion.
+      VpcId: !Ref MinhaVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref WebServerSG
+          Description: Porta da API, somente a partir do Web Server
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref BastionHostSG
+          Description: SSH somente a partir do Bastion Host
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Libera toda saida
+      Tags:
+        - Key: Name
+          Value: backend-sg
+
+  # --- Segurança do Banco de Dados ---
+  DatabaseSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: database-sg
+      GroupDescription: Libera a porta do banco apenas para quem vem do Back-End, e SSH do Bastion.
+      VpcId: !Ref MinhaVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref BackendSG
+          Description: Porta do banco (Postgres), somente a partir do Back-End
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref BastionHostSG
+          Description: SSH somente a partir do Bastion Host
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Libera toda saida
+      Tags:
+        - Key: Name
+          Value: database-sg
+
+# ==============================================================================
+# OUTPUTS - informações que a AWS mostra depois que o stack é criado
+# ==============================================================================
+# Isso é só para facilitar: depois que você criar essa stack, a AWS vai te
+# mostrar esses valores prontos (por exemplo, o ID da VPC), sem você precisar
+# ir procurar no console.
+# ==============================================================================
+# Cada Output abaixo tem um "Export": isso é o que permite que OUTRO template
+# (o de computação, por exemplo) leia esse valor usando Fn::ImportValue,
+# sem precisar que você copie e cole IDs manualmente. O nome do export usa
+# !Sub "${AWS::StackName}-NomeDoRecurso" para garantir que fique único mesmo
+# se você criar essa stack mais de uma vez com nomes diferentes.
+# ==============================================================================
+Outputs:
+
+  VpcId:
+    Description: ID da VPC criada
+    Value: !Ref MinhaVPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VpcId"
+
+  InternetGatewayId:
+    Description: ID do Internet Gateway
+    Value: !Ref MeuInternetGateway
+    Export:
+      Name: !Sub "${AWS::StackName}-InternetGatewayId"
+
+  NatGatewayId:
+    Description: ID do NAT Gateway
+    Value: !Ref MeuNatGateway
+    Export:
+      Name: !Sub "${AWS::StackName}-NatGatewayId"
+
+  NatGatewayElasticIpAllocationId:
+    Description: Allocation ID do Elastic IP do NAT Gateway
+    Value: !GetAtt MeuElasticIP.AllocationId
+    Export:
+      Name: !Sub "${AWS::StackName}-NatGatewayElasticIpAllocationId"
+
+  PublicRouteTableId:
+    Description: ID da Route Table publica
+    Value: !Ref RouteTablePublica
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicRouteTableId"
+
+  PrivateRouteTableId:
+    Description: ID da Route Table privada
+    Value: !Ref RouteTablePrivada
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateRouteTableId"
+
+  SubnetPublicaAId:
+    Description: ID da subnet publica us-east-1a
+    Value: !Ref SubnetPublicaA
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetPublicaAId"
+
+  SubnetPublicaBId:
+    Description: ID da subnet publica us-east-1b
+    Value: !Ref SubnetPublicaB
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetPublicaBId"
+
+  SubnetPrivadaWebAId:
+    Description: ID da subnet privada Web us-east-1a
+    Value: !Ref SubnetPrivadaWebA
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetPrivadaWebAId"
+
+  SubnetPrivadaWebBId:
+    Description: ID da subnet privada Web us-east-1b
+    Value: !Ref SubnetPrivadaWebB
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetPrivadaWebBId"
+
+  SubnetPrivadaBackendId:
+    Description: ID da subnet privada Back-End
+    Value: !Ref SubnetPrivadaBackend
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetPrivadaBackendId"
+
+  SubnetPrivadaDatabaseAId:
+    Description: ID da subnet privada Database us-east-1a
+    Value: !Ref SubnetPrivadaDatabase
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetPrivadaDatabaseAId"
+
+  SubnetPrivadaDatabaseBId:
+    Description: ID da subnet privada Database us-east-1b
+    Value: !Ref SubnetPrivadaDatabaseB
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetPrivadaDatabaseBId"
+
+  BastionHostSecurityGroupId:
+    Description: ID do Security Group do Bastion Host
+    Value: !Ref BastionHostSG
+    Export:
+      Name: !Sub "${AWS::StackName}-BastionHostSecurityGroupId"
+
+  WebServerSecurityGroupId:
+    Description: ID do Security Group dos Web Servers
+    Value: !Ref WebServerSG
+    Export:
+      Name: !Sub "${AWS::StackName}-WebServerSecurityGroupId"
+
+  BackEndSecurityGroupId:
+    Description: ID do Security Group do Back-End
+    Value: !Ref BackendSG
+    Export:
+      Name: !Sub "${AWS::StackName}-BackEndSecurityGroupId"
+
+  DatabaseSecurityGroupId:
+    Description: ID do Security Group do Database
+    Value: !Ref DatabaseSG
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseSecurityGroupId"
+
+  ALBSecurityGroupId:
+    Description: ID do Security Group do Application Load Balancer
+    Value: !Ref ALBSG
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBSecurityGroupId"
