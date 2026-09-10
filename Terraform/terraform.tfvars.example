@@ -1,0 +1,17 @@
+# Copie este arquivo para terraform.tfvars e preencha os valores
+# NÃO comite o arquivo terraform.tfvars no git (contém segredos)
+
+# Senha do banco de dados RDS MySQL (mínimo 8 caracteres)
+db_master_user_password = "MeGusta2026!"
+
+# IP público permitido para acessar o Bastion Host via SSH (formato CIDR)
+# Exemplo: "203.0.113.45/32"
+bastion_allowed_cidr = "0.0.0.0/0"
+
+# Caminho para a chave pública SSH (usada para criar o Key Pair na AWS)
+public_key_path = "./megusta-key.pub"
+
+
+#provider "aws" {
+#  region = var.aws_region
+#}

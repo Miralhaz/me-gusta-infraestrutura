@@ -1,2 +1,9 @@
 .env
 /volume
+*.tfvars
+*.tfvars.*
+!*.tfvars.example
+.terraform/
+*.tfstate
+*.tfstate.*
+megusta-key
