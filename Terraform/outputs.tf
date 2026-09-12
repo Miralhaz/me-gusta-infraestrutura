@@ -54,3 +54,23 @@ output "rds_endpoint" {
   description = "Endpoint do RDS MySQL."
   value       = aws_db_instance.megusta.address
 }
+
+output "s3_raw_bucket_name" {
+  description = "Nome do bucket S3 Raw."
+  value       = aws_s3_bucket.raw.bucket
+}
+
+output "s3_trusted_bucket_name" {
+  description = "Nome do bucket S3 Trusted."
+  value       = aws_s3_bucket.trusted.bucket
+}
+
+output "s3_curated_bucket_name" {
+  description = "Nome do bucket S3 Curated."
+  value       = aws_s3_bucket.curated.bucket
+}
+
+output "s3_relatorios_bucket_name" {
+  description = "Nome do bucket S3 Relatorios."
+  value       = aws_s3_bucket.relatorios.bucket
+}
