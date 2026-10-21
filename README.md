@@ -1,6 +1,6 @@
 # Guia de Contribuição
 
-Este documento define o fluxo de desenvolvimento, criação de branches, commits e Pull Requests deste projeto.
+Este documento define o fluxo de desenvolvimento, criação de branches, commits e ssull Requests deste projeto.
 
 O objetivo é manter o código organizado, facilitar a revisão das alterações e evitar que mudanças sejam inseridas diretamente na branch principal sem revisão.
 

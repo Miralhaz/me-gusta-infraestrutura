@@ -3,7 +3,15 @@
 *.tfvars
 *.tfvars.*
 !*.tfvars.example
+terraform.tfvars.example
 .terraform/
 *.tfstate
 *.tfstate.*
 megusta-key
+Terraform.zip
+Terraform-full.zip
+*config-infra.txt
+.terraform.lock.hcl
+tfplan
+ubuntu*
+

@@ -1,0 +1,124 @@
+{
+  "rabbit_version": "4.0.0",
+  "rabbitmq_version": "4.0.0",
+  "product_version": "4.0.0",
+  "product_name": "RabbitMQ",
+  "users": [
+    {
+      "name": "admin",
+      "password_hash": "WzAsIlJhaW5ib3ciXQ==",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ["administrator"]
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "admin",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "topic_permissions": [],
+  "parameters": [],
+  "global_parameters": [
+    {
+      "name": "cluster_name",
+      "value": "megusta-rabbitmq-cluster"
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "/",
+      "name": "ha-quorum-policy",
+      "pattern": "^(?!amq\\.).*",
+      "apply-to": "queues",
+      "definition": {
+        "ha-mode": "all",
+        "ha-sync-mode": "automatic",
+        "queue-type": "quorum",
+        "delivery-limit": 10,
+        "overflow": "reject-publish"
+      },
+      "priority": 1
+    }
+  ],
+  "queues": [
+    {
+      "name": "megusta.estoque",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "queue-type": "quorum",
+        "delivery-limit": 10,
+        "overflow": "reject-publish"
+      }
+    },
+    {
+      "name": "megusta.notificacoes",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "queue-type": "quorum",
+        "delivery-limit": 10,
+        "overflow": "reject-publish"
+      }
+    },
+    {
+      "name": "megusta.pedidos",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "queue-type": "quorum",
+        "delivery-limit": 10,
+        "overflow": "reject-publish"
+      }
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "megusta.exchange",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "megusta.exchange",
+      "vhost": "/",
+      "destination": "megusta.estoque",
+      "destination_type": "queue",
+      "routing_key": "estoque.*",
+      "arguments": {}
+    },
+    {
+      "source": "megusta.exchange",
+      "vhost": "/",
+      "destination": "megusta.notificacoes",
+      "destination_type": "queue",
+      "routing_key": "notificacoes.*",
+      "arguments": {}
+    },
+    {
+      "source": "megusta.exchange",
+      "vhost": "/",
+      "destination": "megusta.pedidos",
+      "destination_type": "queue",
+      "routing_key": "pedidos.*",
+      "arguments": {}
+    }
+  ]
+}
