@@ -1,0 +1,276 @@
+version: "3.8"
+
+# =============================================================================
+# MeGusta - Docker Swarm Stack
+# =============================================================================
+# Deploy: docker stack deploy -c docker-compose.yml megusta
+# Requer: Swarm inicializado (managers: bastion-a, bastion-b; workers: web-a, web-b, backend-a, backend-b, database-a)
+# =============================================================================
+
+services:
+  # -----------------------------------------------------------------------------
+  # FRONTEND - React + Nginx (2 replicas, one per AZ worker)
+  # -----------------------------------------------------------------------------
+  frontend:
+    image: megusta-frontend:latest
+    environment:
+      - NODE_ENV=production
+    # O ALB aponta para as instancias "web" na porta 80 (nginx do host, via user_data).
+    # O nginx do host faz reverse proxy para 127.0.0.1:8080, que e o host port
+    # publicado aqui (mode: host => cada no web expoe o container localmente).
+    ports:
+      - target: 80
+        published: 8080
+        protocol: tcp
+        mode: host
+    networks:
+      - megusta-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      replicas: 2
+      placement:
+        # Frontend roda apenas nos nos "web" (onde o ALB aponta)
+        constraints:
+          - node.labels.role == web
+        preferences:
+          - spread: node.labels.az
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    labels:
+      - "megusta.service=frontend"
+      - "megusta.version=1.0"
+
+  # -----------------------------------------------------------------------------
+  # BACKEND - Spring Boot (2 replicas, one per AZ worker)
+  # -----------------------------------------------------------------------------
+  backend:
+    image: megusta-backend:latest
+    environment:
+      - SPRING_PROFILES_ACTIVE=production
+      - SPRING_DATASOURCE_URL=jdbc:mysql://database:3306/megusta?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      - SPRING_DATASOURCE_USERNAME=megusta_admin
+      - SPRING_DATASOURCE_PASSWORD=sptech
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+      - SPRING_JPA_SHOW_SQL=true
+      - SPRING_JPA_PROPERTIES_HIBERNATE_FORMAT_SQL=true
+      - JWT_SECRET=sptech
+      - SERVER_PORT=8080
+      - SPRING_JACKSON_SERIALIZATION_WRITE_DATES_AS_TIMESTAMPS=false
+      - LOGGING_LEVEL_ROOT=INFO
+      - LOGGING_LEVEL_SCHOOL_SPTECH_MEGUSTA=INFO
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USERNAME=admin
+      - RABBITMQ_PASSWORD=admin
+    networks:
+      - megusta-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      replicas: 2
+      placement:
+        # Backend roda apenas nos nos "backend" (conforme arquitetura)
+        constraints:
+          - node.labels.role == backend
+        preferences:
+          - spread: node.labels.az
+      restart_policy:
+        condition: any
+        delay: 10s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 15s
+        failure_action: rollback
+        monitor: 60s
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    healthcheck:
+      # O backend NAO possui spring-boot-starter-actuator, entao /actuator/health
+      # retorna 404. Usamos /v3/api-docs, que e permitAll no SecurityConfigurations
+      # e responde 200 quando a aplicacao Spring esta pronta.
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v3/api-docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    labels:
+      - "megusta.service=backend"
+      - "megusta.version=1.0"
+
+  # -----------------------------------------------------------------------------
+  # DATABASE - MySQL 8.0 (Single instance on database-a worker in AZ A)
+  # -----------------------------------------------------------------------------
+  database:
+    image: megusta-database:latest
+    environment:
+      - MYSQL_ROOT_PASSWORD=sptech_root_2024
+      - MYSQL_DATABASE=megusta
+      - MYSQL_USER=megusta_admin
+      - MYSQL_PASSWORD=sptech
+      - MYSQL_ROOT_HOST=%
+    command:
+      - --bind-address=0.0.0.0
+      - --port=3306
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-connections=200
+      - --innodb-buffer-pool-size=256M
+    volumes:
+      - database_data:/var/lib/mysql
+      - database_logs:/var/log/mysql
+
+    networks:
+      - megusta-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == worker
+          - node.labels.role == database
+      restart_policy:
+        condition: any
+        delay: 15s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "megusta_admin", "-psptech"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    labels:
+      - "megusta.service=database"
+      - "megusta.version=1.0"
+
+  # -----------------------------------------------------------------------------
+  # RABBITMQ - Message Broker (2 replicas for HA, one per AZ)
+  # -----------------------------------------------------------------------------
+  rabbitmq:
+    image: megusta-rabbitmq:latest
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=admin
+      - RABBITMQ_DEFAULT_VHOST=/
+      - RABBITMQ_ERLANG_COOKIE=megusta_erlang_cookie_secret_2024
+    volumes:
+      # A config (rabbitmq.conf + definitions.json) vem embutida na imagem
+      # (megusta-rabbitmq), evitando bind mounts com caminhos relativos.
+      - rabbitmq_data:/var/lib/rabbitmq
+      - rabbitmq_logs:/var/log/rabbitmq
+    networks:
+      - megusta-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      replicas: 2
+      placement:
+        constraints:
+          - node.role == worker
+        preferences:
+          - spread: node.labels.az
+      restart_policy:
+        condition: any
+        delay: 10s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "megusta.service=rabbitmq"
+      - "megusta.version=1.0"
+
+# -----------------------------------------------------------------------------
+# NETWORKS
+# -----------------------------------------------------------------------------
+networks:
+  megusta-net:
+    driver: overlay
+    attachable: true
+    name: megusta-net
+    labels:
+      - "megusta.network=main"
+
+# -----------------------------------------------------------------------------
+# VOLUMES
+# -----------------------------------------------------------------------------
+volumes:
+  database_data:
+    driver: local
+    name: megusta_database_data
+    labels:
+      - "megusta.volume=database_data"
+  database_logs:
+    driver: local
+    name: megusta_database_logs
+    labels:
+      - "megusta.volume=database_logs"
+  rabbitmq_data:
+    driver: local
+    name: megusta_rabbitmq_data
+    labels:
+      - "megusta.volume=rabbitmq_data"
+  rabbitmq_logs:
+    driver: local
+    name: megusta_rabbitmq_logs
+    labels:
+      - "megusta.volume=rabbitmq_logs"

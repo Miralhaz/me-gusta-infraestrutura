@@ -1,0 +1,42 @@
+# =============================================================================
+# MeGusta Database - MySQL 8.0 Custom Image
+# =============================================================================
+# Build context: ../../me-gusta-database (from repo root)
+# Build: docker build -f config/docker/Dockerfile.database -t megusta-database:latest .
+# =============================================================================
+
+FROM mysql:8.0
+
+# Labels
+LABEL maintainer="MeGusta Team"
+LABEL version="1.0"
+LABEL description="MeGusta MySQL Database with pre-loaded schema and seed data"
+
+# Configuração do MySQL
+COPY config/docker/config/mysql/custom.cnf /etc/mysql/conf.d/custom.cnf
+
+# Scripts de inicialização (executados em ordem alfabética)
+COPY config/docker/init-scripts/01-schema.sql /docker-entrypoint-initdb.d/01-schema.sql
+COPY config/docker/init-scripts/02-seed-data.sql /docker-entrypoint-initdb.d/02-seed-data.sql
+
+# Healthcheck script
+COPY config/docker/scripts/healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/healthcheck.sh
+
+# Variáveis de ambiente padrão
+ENV MYSQL_ROOT_PASSWORD=sptech_root_2024 \
+    MYSQL_DATABASE=megusta \
+    MYSQL_USER=megusta_admin \
+    MYSQL_PASSWORD=sptech \
+    MYSQL_ROOT_HOST=%
+
+# Portas
+EXPOSE 3306 33060
+
+# Healthcheck
+HEALTHCHECK --interval=10s --timeout=5s --retries=10 --start-period=30s \
+    CMD /usr/local/bin/healthcheck.sh
+
+# Entry point padrão do MySQL
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["mysqld"]

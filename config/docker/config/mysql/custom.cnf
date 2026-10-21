@@ -1,0 +1,59 @@
+# =============================================================================
+# MeGusta MySQL Custom Configuration
+# =============================================================================
+
+[mysqld]
+# Conexão
+bind-address=0.0.0.0
+port=3306
+max_connections=200
+max_connect_errors=1000000
+
+# Autenticação
+# NOTA: `default-authentication-plugin` foi deprecated (8.0) e REMOVIDO (8.4+).
+# O padrao do mysql:8.0 (caching_sha2_password) e suficiente; o backend ja usa
+# allowPublicKeyRetrieval=true na JDBC URL.
+
+# Charset
+character-set-server=utf8mb4
+collation-server=utf8mb4_unicode_ci
+init-connect='SET NAMES utf8mb4'
+
+# InnoDB Performance
+innodb_buffer_pool_size=256M
+innodb_log_file_size=64M
+innodb_log_buffer_size=16M
+innodb_flush_log_at_trx_commit=2
+innodb_flush_method=O_DIRECT
+innodb_file_per_table=ON
+innodb_read_io_threads=4
+innodb_write_io_threads=4
+
+# Query Cache: REMOVIDO no MySQL 8.0. As variaveis query_cache_* nao existem
+# mais e o mysqld ABORTA na inicializacao se forem passadas ("unknown variable").
+
+# Logs
+log-error=/var/log/mysql/error.log
+slow-query-log=1
+slow-query-log-file=/var/log/mysql/slow.log
+long-query-time=2
+log-queries-not-using-indexes=1
+
+# Binlog (para replicação futura se necessário)
+log-bin=mysql-bin
+binlog-format=ROW
+expire-logs-days=7
+max-binlog-size=100M
+
+# Segurança
+local-infile=0
+skip-name-resolve
+
+# Timezone
+default-time-zone=UTC
+
+[client]
+default-character-set=utf8mb4
+
+[mysql]
+default-character-set=utf8mb4
