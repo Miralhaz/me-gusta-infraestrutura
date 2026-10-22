@@ -29,6 +29,15 @@ NC='\033[0m' # No Color
 # pasta do script. Todos os caminhos locais daqui para baixo devem ser
 # absolutos (via $SCRIPT_DIR) exatamente por isso.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Auto-sanitizacao de EOL: se os arquivos chegaram via scp de uma maquina
+# Windows, podem vir com CRLF (\r\n), o que quebra o bash com
+# "/bin/bash^M: bad interpreter". O fix-eol.sh normaliza tudo para LF antes
+# de qualquer build/deploy. Idempotente e silencioso quando nao ha CRLF.
+if [ -f "$SCRIPT_DIR/fix-eol.sh" ]; then
+    bash "$SCRIPT_DIR/fix-eol.sh" >/dev/null 2>&1 || true
+fi
+
 STACK_NAME="megusta"
 COMPOSE_FILE="$SCRIPT_DIR/docker/docker-compose.yml"
 REBUILD=false

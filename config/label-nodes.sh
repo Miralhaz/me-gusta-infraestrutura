@@ -8,6 +8,12 @@
 
 set -euo pipefail
 
+# Rede de seguranca contra CRLF. Roda se o fix-eol.sh estiver na mesma pasta.
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_SCRIPT_DIR/fix-eol.sh" ]; then
+    bash "$_SCRIPT_DIR/fix-eol.sh" >/dev/null 2>&1 || true
+fi
+
 log() { echo -e "\033[0;34m[$(date '+%H:%M:%S')]\033[0m $1"; }
 success() { echo -e "\033[0;32m[$(date '+%H:%M:%S')] ✓\033[0m $1"; }
 warn() { echo -e "\033[1;33m[$(date '+%H:%M:%S')] ⚠\033[0m $1"; }

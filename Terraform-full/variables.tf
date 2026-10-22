@@ -123,3 +123,67 @@ variable "db_user" {
   type        = string
   default     = "megusta_user"
 }
+
+# =============================================================================
+# Lambda - Export de estoque (API -> RAW)
+# =============================================================================
+variable "api_base_url" {
+  description = "URL base da API MeGusta acessível de dentro da VPC. Se vazio, usa o DNS do ALB na porta 80."
+  type        = string
+  default     = ""
+}
+
+variable "api_login" {
+  description = "Usuário (login/e-mail) usado pela Lambda no POST /login da API."
+  type        = string
+  default     = "admin@megusta.com"
+}
+
+variable "api_password" {
+  description = "Senha do usuário da API usado pela Lambda no POST /login."
+  type        = string
+  sensitive   = true
+  default     = "sptech"
+}
+
+variable "raw_prefix" {
+  description = "Prefixo no bucket RAW onde a Lambda grava os CSVs (deve bater com RAW_PROJECT_PREFIX/crawlers)."
+  type        = string
+  default     = "raw/megusta"
+}
+
+variable "lambda_recursos" {
+  description = "Recursos da API exportados pela Lambda, separados por vírgula."
+  type        = string
+  default     = "insumos,entradas-estoque,saidas-estoque,fornecedores"
+}
+
+variable "lambda_timeout" {
+  description = "Timeout da Lambda de export em segundos."
+  type        = number
+  default     = 300
+}
+
+variable "lambda_memory_size" {
+  description = "Memória (MB) da Lambda de export."
+  type        = number
+  default     = 256
+}
+
+variable "lambda_schedule_enabled" {
+  description = "Se true, cria uma regra do EventBridge para disparar a Lambda periodicamente."
+  type        = bool
+  default     = true
+}
+
+variable "lambda_schedule_expression" {
+  description = "Expressão de agendamento do EventBridge (rate ou cron). Padrão: 1x/dia às 03:00 UTC."
+  type        = string
+  default     = "cron(0 3 * * ? *)"
+}
+
+variable "lambda_log_retention_days" {
+  description = "Retenção em dias dos logs da Lambda no CloudWatch."
+  type        = number
+  default     = 14
+}

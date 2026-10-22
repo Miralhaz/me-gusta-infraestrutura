@@ -76,6 +76,11 @@ ORIGINAL_DIR=$(pwd)
 # Diretório deste script (repo de infraestrutura)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Rede de seguranca contra CRLF. Roda se o fix-eol.sh estiver na mesma pasta.
+if [ -f "$SCRIPT_DIR/fix-eol.sh" ]; then
+    bash "$SCRIPT_DIR/fix-eol.sh" >/dev/null 2>&1 || true
+fi
+
 # Função para determinar nome da imagem
 get_image_name() {
     local base_name="$1"

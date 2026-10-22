@@ -298,4 +298,20 @@ resource "aws_security_group_rule" "swarm_registry" {
   description       = "Local Registry - workers puxam imagens do manager"
 }
 
+# =============================================================================
+# Lambda de export de estoque -> API do backend
+# =============================================================================
+# A Lambda roda dentro da VPC e chama a API REST do backend (porta 8080) para
+# extrair os dados de estoque. Sem esta regra o backend-sg (que so libera 8080
+# para o web_server-sg) bloquearia a chamada com timeout.
+resource "aws_security_group_rule" "backend_from_lambda" {
+  type                     = "ingress"
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.lambda.id
+  security_group_id        = aws_security_group.backend.id
+  description              = "API do backend - acesso da Lambda de export de estoque"
+}
+
 

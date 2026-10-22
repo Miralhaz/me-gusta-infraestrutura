@@ -1,0 +1,54 @@
+# =============================================================================
+# MeGusta - Normalizacao de fim de linha (EOL)
+# =============================================================================
+# Forca LF em todos os arquivos de texto, independente da config
+# core.autocrlf da maquina de cada dev.
+#
+# Motivo: scripts (.sh), Dockerfiles, configs (.cnf/.conf), SQL e user_data
+# (.tpl) quebram no Linux quando chegam com CRLF (\r\n) - vide o erro
+# "/bin/bash^M: bad interpreter: No such file or directory".
+# =============================================================================
+
+# Padrao geral: o Git decide automaticamente e armazena LF no repositorio
+* text=auto eol=lf
+
+# Scripts shell - executados no Linux, exigem LF
+*.sh          text eol=lf
+
+# Dockerfiles - blocos RUN com continuacao "\" quebram com CRLF
+*.Dockerfile  text eol=lf
+Dockerfile    text eol=lf
+Dockerfile.*  text eol=lf
+
+# Configuracoes de servicos (MySQL / RabbitMQ / Nginx)
+*.conf        text eol=lf
+*.cnf         text eol=lf
+
+# SQL / init-scripts
+*.sql         text eol=lf
+
+# Terraform e templates de user_data (rodam shell nas EC2)
+*.tf          text eol=lf
+*.tpl         text eol=lf
+
+# Outros arquivos de texto versionados
+*.yml         text eol=lf
+*.yaml        text eol=lf
+*.json        text eol=lf
+*.py          text eol=lf
+*.md          text eol=lf
+*.properties  text eol=lf
+
+# Chaves SSH sao arquivos de TEXTO (nao binarios!)
+*.pub  text eol=lf
+*.pem  text eol=lf
+
+# Arquivos binarios - nunca converter
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
