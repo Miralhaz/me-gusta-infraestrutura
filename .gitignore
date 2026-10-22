@@ -15,3 +15,13 @@ Terraform-full.zip
 tfplan
 ubuntu*
 
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Terraform - artefatos de build (zip da Lambda)
+Terraform-full/build/
+build/*.zip
+

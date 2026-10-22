@@ -336,6 +336,53 @@ docker system prune -af
 | Docker não sobe (`insecure registry :5000 is not valid: invalid host ""`) | Causa raiz: o teste de Swarm usava `grep -q "active"`, que também casa com **`inactive`** — numa instância nova o script achava que o Swarm já existia, lia `Swarm.NodeAddr` vazio e escrevia `daemon.json` com `":5000"`. **Já corrigido** (comparação exata `== "active"` + fallback de IP). Se acontecer em nó antigo: reescreva o `daemon.json` com o IP privado real (`MGR_IP=$(ip route get 8.8.8.8 \| awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')`) e `systemctl restart docker`. |
 | Build usa o Dockerfile **do repo** em vez do da infra (ex.: log `Step 1/12 : RUN npm ci` e erro `npm ci ... in sync`, quando o nosso `frontend.Dockerfile` tem 14 steps) | Causa raiz: `sync_repo()` fazia `cd "$dest_dir"` **sem voltar**, então após o `--sync-github` o cwd virava o do último repo; o `ensure_dockerfiles()` recalculava `infra_dir` a partir do cwd errado e o `cp` falhava (silenciado por `\|\| true`), deixando o build usar o Dockerfile próprio do repo. **Já corrigido**: `sync_repo` roda o git em subshell (preserva o cwd), `ensure_dockerfiles` usa o `SCRIPT_DIR` resolvido no início, e a cópia de assets agora **aborta com erro** se a origem faltar. Sintoma clássico: só acontece no **2º** deploy em diante (no 1º o repo é clonado, sem `cd`). |
 | `mvn clean package` falha no **`testCompile`** (`RelatorioServiceTest.java ... cannot be applied to given types`, `cannot find symbol`) | Os testes do repo estão desatualizados em relação ao código. `-DskipTests` só pula a **execução**, **não** a compilação de `src/test` — por isso o build ainda quebra. O `backend.Dockerfile` agora usa `-Dmaven.test.skip=true`, que pula compilação **e** execução. Correção definitiva: atualizar/remover esse teste no repo do backend. |
+| `/bin/bash^M: bad interpreter: No such file or directory` ao rodar `./deploy-swarm.sh` | **CRLF (fim de linha do Windows) nos arquivos enviados via `scp`.** O kernel tenta executar `/bin/bash\r`, que não existe. Correção imediata: `sed -i 's/\r$//' *.sh` (ou `./fix-eol.sh`). Os `*.Dockerfile` também precisam ser normalizados, senão o **build falha silenciosamente** (sintoma: `docker stack services megusta` mostra tudo `0/1` e só o `rabbitmq` sobe `2/2`, porque a imagem dele veio antes do arquivo corrompido). Ver seção **Fim de linha (CRLF)** abaixo. |
+
+---
+
+## 🔤 Fim de linha (CRLF) — importante ao enviar do Windows
+
+Os scripts e Dockerfiles deste diretório são feitos para rodar no **Linux**. Se forem editados/copiados de uma máquina Windows, podem chegar ao bastion com terminadores **CRLF (`\r\n`)** em vez de **LF (`\n`)**. Isso causa dois sintomas:
+
+1. **Erro de interpreter** (o mais visível):
+   ```
+   -bash: ./deploy-swarm.sh: /bin/bash^M: bad interpreter: No such file or directory
+   ```
+   O kernel tenta executar `/bin/bash\r`, que não existe.
+
+2. **Build silenciosamente quebrado** (o mais traiçoeiro): os `*.Dockerfile` com CRLF falham na fase de build. Sintoma: `docker stack services megusta` mostra `0/1` em quase tudo e **só o `rabbitmq` aparece `2/2`** (porque a imagem dele foi construída antes dos arquivos corrompidos). Nesse caso, `docker service ps megusta_backend --no-trunc` mostra `No such image` / `image not found`.
+
+### Como resolver
+
+O `fix-eol.sh` normaliza **todos** os arquivos de texto (scripts, Dockerfiles, `.cnf`, `.conf`, `.sql`, `.yml`, `.tf`, `.tpl`, `.json`, `.py`) para LF. É idempotente:
+
+```bash
+# No bastion-a, dentro de /home/ubuntu/config:
+chmod +x fix-eol.sh
+./fix-eol.sh
+```
+
+Os scripts principais (`deploy-swarm.sh`, `build-images.sh`, `join-swarm.sh`, `label-nodes.sh`) já chamam o `fix-eol.sh` automaticamente no início, então na prática **não é preciso rodar à mão** — basta que o `fix-eol.sh` esteja na mesma pasta.
+
+### Outras formas de corrigir pontualmente
+
+```bash
+# Todos os .sh de uma vez:
+sed -i 's/\r$//' *.sh
+# Tudo (scripts + Dockerfiles + configs):
+find . -type f \( -name '*.sh' -o -name '*.Dockerfile' -o -name 'Dockerfile*' -o -name '*.conf' -o -name '*.cnf' -o -name '*.sql' -o -name '*.yml' -o -name '*.tpl' \) -exec sed -i 's/\r$//' {} +
+# Verificar se sobrou algum:
+grep -rlU $'\r' . || echo "OK: nenhum CRLF"
+```
+
+No `vim`: `:set ff=unix` (ou `:set fileformat=unix`) seguido de `:wq`. Funciona, mas é **arquivo por arquivo** — fácil esquecer um.
+
+### Prevenção
+
+- O repositório tem um **`.gitattributes`** na raiz forçando `eol=lf` nos tipos sensíveis, então o Git não introduz CRLF no working tree.
+- O repositório tem um **`.editorconfig`** na raiz, que faz os editores (VS Code, IntelliJ, Vim, Sublime) **já salvarem em LF** — evita que o CRLF entre antes mesmo do commit.
+- Ao fazer `scp`/upload, use **modo binário**. Clientes gráficos (WinSCP, FileZilla) têm a opção "Transfer mode: Binary" / "Auto → Binary"; em modo texto eles reconvertem LF→CRLF no upload.
+- Se o Git ainda avisar `LF will be replaced by CRLF`, ajuste: `git config core.autocrlf input`.
 
 ---
 

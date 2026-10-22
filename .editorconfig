@@ -1,0 +1,48 @@
+# =============================================================================
+# MeGusta - EditorConfig
+# =============================================================================
+# Faz os editores (VS Code, IntelliJ, Vim, Sublime, etc.) salvarem os arquivos
+# com LF em vez de CRLF ja na hora de gravar, fechando mais uma porta de
+# entrada de CRLF. Complementa o .gitattributes (que atua no Git).
+#
+# Docs: https://editorconfig.org
+# =============================================================================
+
+# Valor padrao: LF, UTF-8 e sem espacos no fim das linhas
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Scripts shell - 2 espacos (convencao do projeto)
+[*.sh]
+indent_style = space
+indent_size = 4
+
+# Dockerfiles
+[*.{Dockerfile,Dockerfile.*}]
+indent_style = space
+indent_size = 4
+
+# YAML / JSON
+[*.{yml,yaml,json}]
+indent_style = space
+indent_size = 2
+
+# Terraform
+[*.{tf,tfvars}]
+indent_style = space
+indent_size = 2
+
+# Markdown - nao remover espacos no fim (quebram quebra de linha intencional)
+[*.md]
+trim_trailing_whitespace = false
+
+# Makefile exige TAB
+[Makefile]
+indent_style = tab

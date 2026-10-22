@@ -183,3 +183,24 @@ output "cloudwatch_dashboard_name" {
   description = "Nome do dashboard CloudWatch."
   value       = aws_cloudwatch_dashboard.megusta.dashboard_name
 }
+
+# Lambda Outputs
+output "lambda_export_function_name" {
+  description = "Nome da função Lambda de export de estoque (API -> RAW)."
+  value       = aws_lambda_function.export_megusta_estoque.function_name
+}
+
+output "lambda_export_function_arn" {
+  description = "ARN da função Lambda de export de estoque."
+  value       = aws_lambda_function.export_megusta_estoque.arn
+}
+
+output "lambda_export_security_group_id" {
+  description = "ID do Security Group da Lambda de export de estoque."
+  value       = aws_security_group.lambda.id
+}
+
+output "lambda_export_role_arn" {
+  description = "ARN da role usada pela Lambda de export de estoque."
+  value       = local.lambda_role_arn
+}

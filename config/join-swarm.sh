@@ -16,6 +16,12 @@
 
 set -euo pipefail
 
+# Rede de seguranca contra CRLF. Roda se o fix-eol.sh estiver na mesma pasta.
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_SCRIPT_DIR/fix-eol.sh" ]; then
+    bash "$_SCRIPT_DIR/fix-eol.sh" >/dev/null 2>&1 || true
+fi
+
 # Cores
 RED='\033[0;31m'
 GREEN='\033[0;32m'
