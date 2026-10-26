@@ -24,7 +24,7 @@ COPY config/docker/scripts/healthcheck.sh /usr/local/bin/healthcheck.sh
 RUN chmod +x /usr/local/bin/healthcheck.sh
 
 # Variáveis de ambiente padrão
-ENV MYSQL_ROOT_PASSWORD=sptech_root_2024 \
+ENV MYSQL_ROOT_PASSWORD=megusta_root_2026 \
     MYSQL_DATABASE=megusta \
     MYSQL_USER=megusta_admin \
     MYSQL_PASSWORD=sptech \
