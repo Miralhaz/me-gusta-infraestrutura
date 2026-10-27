@@ -107,7 +107,7 @@ def autenticar():
     resp = _request(
         "POST",
         "/login",
-        payload={"login": API_LOGIN, "senha": API_PASSWORD},
+        payload={"email": API_LOGIN, "senha": API_PASSWORD},
     )
     token = (resp or {}).get("token")
     if not token:

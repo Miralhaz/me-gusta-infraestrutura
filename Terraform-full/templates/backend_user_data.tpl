@@ -323,35 +323,7 @@ case "$JAVA_FIRST_LINE" in
         ;;
 esac
 
-# Create a simple health check endpoint for the backend
-mkdir -p /opt/megusta-backend
-cat > /opt/megusta-backend/health.sh <<'HEALTH_EOF'
-#!/bin/bash
-echo "Backend ${hostname} - Healthy"
-HEALTH_EOF
-chmod +x /opt/megusta-backend/health.sh
-
-# Systemd service for backend health check (port 8080)
-cat > /etc/systemd/system/megusta-backend-health.service <<'SVC_EOF'
-[Unit]
-Description=MeGusta Backend Health Check
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 -m http.server 8080 --directory /opt/megusta-backend
-Restart=always
-User=ubuntu
-
-[Install]
-WantedBy=multi-user.target
-SVC_EOF
-
-systemctl daemon-reload
-systemctl start megusta-backend-health
-systemctl enable megusta-backend-health
-
-# Start Nginx (health check endpoint)
+# Health check via Nginx (porta 80) - backend app na porta 8080 via Swarm/host publish
 systemctl start nginx
 systemctl enable nginx
 echo "<html><body><h1>Backend ${hostname} - Healthy</h1></body></html>" > /var/www/html/index.html

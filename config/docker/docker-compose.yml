@@ -64,6 +64,11 @@ services:
   # -----------------------------------------------------------------------------
   backend:
     image: megusta-backend:latest
+    ports:
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: host
     environment:
       - SPRING_PROFILES_ACTIVE=production
       - SPRING_DATASOURCE_URL=jdbc:mysql://database:3306/megusta?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
@@ -132,7 +137,7 @@ services:
   database:
     image: megusta-database:latest
     environment:
-      - MYSQL_ROOT_PASSWORD=sptech_root_2024
+      - MYSQL_ROOT_PASSWORD=megusta_root_2026
       - MYSQL_DATABASE=megusta
       - MYSQL_USER=megusta_admin
       - MYSQL_PASSWORD=sptech
