@@ -240,6 +240,15 @@ resource "aws_instance" "backend_a" {
   vpc_security_group_ids = [aws_security_group.backend.id]
   iam_instance_profile   = var.lab_instance_profile_name
 
+  # O consumer roda em container e usa o LabInstanceProfile para chamar o SES.
+  # O hop limit 2 permite que o container alcance o IMDS (169.254.169.254);
+  # com o default 1 apenas o proprio host consegue obter as credenciais.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "optional"
+    http_put_response_hop_limit = 2
+  }
+
   user_data                   = local.backend_a_user_data
   user_data_replace_on_change = true
 
@@ -259,6 +268,14 @@ resource "aws_instance" "backend_b" {
   subnet_id              = aws_subnet.privada_backend_b.id
   vpc_security_group_ids = [aws_security_group.backend.id]
   iam_instance_profile   = var.lab_instance_profile_name
+
+  # Mesmo motivo do backend-a: o consumer em container precisa do IMDS para
+  # obter as credenciais temporarias do LabInstanceProfile e chamar o SES.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "optional"
+    http_put_response_hop_limit = 2
+  }
 
   user_data                   = local.backend_b_user_data
   user_data_replace_on_change = true

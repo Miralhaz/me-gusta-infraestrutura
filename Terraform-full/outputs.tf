@@ -204,3 +204,21 @@ output "lambda_export_role_arn" {
   description = "ARN da role usada pela Lambda de export de estoque."
   value       = local.lambda_role_arn
 }
+
+# =============================================================================
+# SES - alertas por e-mail
+# =============================================================================
+output "ses_email_identities" {
+  description = "Identidades de e-mail gerenciadas no SES."
+  value       = sort(keys(aws_sesv2_email_identity.alertas))
+}
+
+output "ses_email_identity_arns" {
+  description = "ARN de cada identidade verificada no SES."
+  value       = { for email, identity in aws_sesv2_email_identity.alertas : email => identity.arn }
+}
+
+output "ses_email_identity_verified_for_sending" {
+  description = "Status de verificacao por e-mail (true = link de verificacao ja foi clicado)."
+  value       = { for email, identity in aws_sesv2_email_identity.alertas : email => identity.verified_for_sending_status }
+}

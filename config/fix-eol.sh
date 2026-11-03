@@ -42,6 +42,9 @@ mapfile -t files < <(find . -type f \
      -o -name '*.tf' \
      -o -name '*.json' \
      -o -name '*.properties' \
+     -o -name '*.patch' \
+     -o -name '.env' \
+     -o -name '.env.*' \
      -o -name '*.py' \
   \) -not -path './.git/*')
 

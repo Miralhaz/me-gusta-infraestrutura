@@ -1,0 +1,849 @@
+diff --git a/megusta-consumer/megusta-consumer/README.md b/megusta-consumer/megusta-consumer/README.md
+index fa053e0..a1141ba 100644
+--- a/megusta-consumer/megusta-consumer/README.md
++++ b/megusta-consumer/megusta-consumer/README.md
+@@ -1,55 +1,103 @@
+-# Me Gusta — Consumer de alertas para WhatsApp
++# MeGusta - consumer de alertas de estoque por e-mail
+ 
+-Projeto independente **Java 21 / Spring Boot 3.5.13**. Inclui Maven Wrapper da base e Dockerfile com Java 21. 
+-
+-O consumer não precisa de MySQL, JPA, endpoints HTTP nem JWT. 
+-As dependências incluem somente mensageria, JSON e testes. 
++Projeto independente **Java 21 / Spring Boot 3.5.13**, com Maven Wrapper e
++Dockerfile multi-stage. O consumer nao acessa MySQL, nao expoe HTTP/JWT e nao
++depende do pacote Java do backend.
+ 
+ ## Como funciona
+ 
+-RabbitAlertaEstoquePublisher do backend → topic exchange → fila deste consumer → AlertaEstoqueConsumer → ObjectMapper → WhatsAppService → API oficial da Meta.
++```text
++backend (RabbitAlertaEstoquePublisher)
++  -> topic exchange "megusta.estoque" / routing key "alerta.estoque"
++       -> fila "megusta.email.alertas" (declarada por este consumer)
++            -> AlertaEstoqueConsumer -> EmailService -> SES (ou SMTP)
++```
+ 
+-O producer já serializa AlertaEstoqueMensagem para JSON. Não existe arquivo PDF, Excel, URL ou anexo nesse contrato. Este consumer recebe os bytes JSON da mensagem e os desserializa; não lê um arquivo do disco nem envia documentos ao WhatsApp.
++O producer serializa `AlertaEstoqueMensagem` como JSON. O consumer le os bytes
++e desserializa; nao existe PDF, Excel, URL ou anexo nesse contrato.
+ 
+-Classes:
+-- RabbitConfig: declara exchange durável, fila, binding e fila de falhas (DLQ).
+-- AlertaEstoqueMensagem: mesmo contrato do producer, com telefone e alertas.
+-- AlertaEstoqueConsumer: recebe Message e usa ObjectMapper.readValue. Ignora o cabeçalho __TypeId__ do producer, evitando depender do pacote Java dele.
+-- MensagemFormatter: valida os campos, normaliza telefone e monta resumo.
+-- WhatsAppService: POST HTTPS para /PHONE_NUMBER_ID/messages com Bearer token e template.
++| Classe | Papel |
++|---|---|
++| `RabbitConfig` | Declara exchange, fila, binding e DLQ. |
++| `AlertaEstoqueMensagem` | Mesmo contrato do producer: `email` + `alertas`. |
++| `AlertaEstoqueConsumer` | Le a `Message`, ignora `__TypeId__` e chama o envio. |
++| `MensagemFormatter` | Valida os campos e monta o resumo (ate 800 caracteres). |
++| `EmailService` | Envia por SES v2 (API) ou SMTP generico. |
+ 
+-## 1. Configurar RabbitMQ
++### Transportes
+ 
+-Use o MESMO host, porta, virtual host, usuário e senha do producer. O usuário precisa de permissões para declarar exchange/fila/binding e consumir.
++- **`MAIL_TRANSPORT=smtp`** (padrao): usa `spring-boot-starter-mail` com `SMTP_*`
++  (Gmail, Microsoft 365 ou SES SMTP).
++- **`MAIL_TRANSPORT=ses`**: usa o AWS SDK v2 (`software.amazon.awssdk:sesv2`)
++  com a cadeia padrao de credenciais. No Docker Swarm, as credenciais vem do
++  `LabInstanceProfile` das instancias backend. **Nao ha senha de e-mail no `.env`.**
+ 
+-Defaults confirmados na base: exchange `megusta.estoque`, routing key `alerta.estoque`, host `localhost`, porta `5672` e virtual host `/`. Se sobrescrever as variáveis no backend, use os mesmos valores no consumer:
++Variaveis lidas pelo consumer:
+ 
+-| Backend | Variável do consumer |
+-|---|---|
+-| megusta.rabbitmq.exchange | RABBITMQ_EXCHANGE |
+-| megusta.rabbitmq.routing-key | RABBITMQ_ROUTING_KEY |
++| Variavel | Usada em | Descricao |
++|---|---|---|
++| `MAIL_TRANSPORT` | ambos | `smtp` (padrao) ou `ses`. |
++| `SES_REGION` | ses | Regiao do SES (padrao `us-east-1`). |
++| `SES_FROM` | ses | Remetente verificado no SES. |
++| `SMTP_HOST`/`SMTP_PORT` | smtp | Servidor SMTP (padrao `587`). |
++| `SMTP_USERNAME`/`SMTP_PASSWORD` | smtp | Credenciais SMTP. |
++| `SMTP_FROM` | smtp | Remetente. |
++| `SMTP_AUTH`/`SMTP_STARTTLS`/`SMTP_SSL` | smtp | Ajustes de TLS (padroes `true`/`true`/`false`). |
++| `ALERTA_EMAIL_TO` | ambos | Override de teste; vazio em producao. |
++| `RABBITMQ_*` | ambos | Conexao e nomes de exchange/fila (ver abaixo). |
+ 
+-RABBITMQ_QUEUE é opcional; padrão: megusta.whatsapp.alertas. Use uma fila nova se já houver uma com argumentos diferentes; RabbitMQ rejeita redeclarações incompatíveis. Não apague uma fila com mensagens para resolver esse erro.
++## 1. RabbitMQ
+ 
+-Inicie o consumer ANTES de disparar o producer pela primeira vez, para criar a fila e binding. Um exchange sem fila vinculada não guarda as mensagens anteriores. O producer fornecido não configura aqui confirmação de publicação/retorno de mensagens não roteadas; isso é uma melhoria separada.
++Use o **mesmo** host, porta, virtual host, usuario e senha do producer. O
++usuario precisa declarar exchange/fila/binding e consumir.
++
++Defaults: exchange `megusta.estoque`, routing key `alerta.estoque`, fila
++`megusta.email.alertas`, host `localhost`, porta `5672`, vhost `/`.
++
++Se o backend sobrescrever os nomes, use os mesmos valores no consumer:
++
++| Backend | Variavel do consumer |
++|---|---|
++| `megusta.rabbitmq.exchange` | `RABBITMQ_EXCHANGE` |
++| `megusta.rabbitmq.routing-key` | `RABBITMQ_ROUTING_KEY` |
++| `megusta.rabbitmq.queue` | `RABBITMQ_QUEUE` |
+ 
+-## 2. Preparar WhatsApp Cloud API
++Inicie o consumer **antes** de disparar o producer pela primeira vez, para
++criar a fila e o binding. A DLQ `megusta.email.alertas.dlq` e o exchange
++`megusta.email.alertas.dlx` sao derivados do nome da fila.
+ 
+-Este projeto assume a API oficial da Meta; Twilio, Z-API e Evolution têm contratos distintos e exigem adaptar WhatsAppService.
++## 2. Envio pelo SES (opcional)
++
++> No AWS Academy a role do laboratorio bloqueia `ses:CreateEmailIdentity`,
++> `ses:GetEmailIdentity` e `ses:SendEmail`. Use o SMTP da secao 3.
+ 
+-No painel Meta, configure o aplicativo WhatsApp, número remetente, token válido com permissão de envio e destinatário autorizado para o teste. WHATSAPP_PHONE_NUMBER_ID é o ID do número REMETENTE no painel, não o telefone do cliente e não o WABA ID. Use somente destinatários que autorizaram as notificações.
++1. Verifique a identidade do remetente no SES (a infraestrutura faz isso via
++   Terraform; veja `config/README.md`). Clique no link recebido por e-mail.
++2. No sandbox, verifique tambem cada destinatario de teste. O mesmo endereco
++   pode ser remetente e destinatario.
++3. A instancia onde o consumer roda precisa do `LabInstanceProfile` (ou de uma
++   role com `ses:SendEmail`) e de acesso ao IMDS. A infraestrutura ja configura
++   `http_put_response_hop_limit = 2` nas instancias backend para o container
++   conseguir obter as credenciais.
++4. Para producao, solicite a saida do sandbox no console do SES.
+ 
+-Crie e obtenha aprovação de um template em pt_BR com UMA variável posicional no corpo, sem cabeçalho/botões obrigatórios. Sugestão de nome: alerta_estoque_megusta. Sugestão de corpo:
++O remetente (`SES_FROM`) precisa ser uma identidade verificada; o destinatario
++vem do campo `email` da mensagem (ultimo usuario cadastrado no banco).
+ 
+-> Alerta de estoque Me Gusta: {{1}}. Confira os insumos e programe a reposição.
++## 3. Envio por SMTP (padrao no AWS Academy)
+ 
+-Exemplo para aprovação da variável: Farinha (INS001): atual 2, mínimo 5
++Configure `MAIL_TRANSPORT=smtp` e preencha `SMTP_*`:
+ 
+-O código envia o resumo completo nessa variável. O nome e idioma precisam coincidir com o template aprovado. A Meta decide a aprovação e categoria. Fora da janela de atendimento de 24 horas, utilize templates aprovados; este consumer usa template em todos os envios. Escolha uma versão da Graph API suportada pelo seu app e informe WHATSAPP_API_VERSION (formato vNN.0).
++- **Gmail:** `smtp.gmail.com:587` + senha de app (a senha normal nao funciona).
++- **Microsoft 365:** `smtp.office365.com:587` com SMTP AUTH habilitado.
++- **SES SMTP:** `email-smtp.<regiao>.amazonaws.com:587` com credenciais SMTP
++  do IAM (exige criar um usuario IAM, o que pode nao estar disponivel no
++  laboratorio; por isso o padrao e SMTP com Gmail/365).
+ 
+-## 3. Executar no Windows PowerShell
++## 4. Executar no Windows PowerShell
+ 
+-Instale JDK 21. O Maven Wrapper baixa a distribuição configurada na base, sem exigir Maven instalado. Dentro desta pasta, defina:
++Instale o JDK 21. O Maven Wrapper baixa o Maven configurado. Na pasta do
++projeto:
+ 
+ ```powershell
+ $env:RABBITMQ_HOST="localhost"
+@@ -59,63 +104,54 @@ $env:RABBITMQ_PASSWORD="guest"
+ $env:RABBITMQ_VHOST="/"
+ $env:RABBITMQ_EXCHANGE="megusta.estoque"
+ $env:RABBITMQ_ROUTING_KEY="alerta.estoque"
+-$env:WHATSAPP_TOKEN="TOKEN_DA_META"
+-$env:WHATSAPP_PHONE_NUMBER_ID="ID_NUMERICO_DO_REMETENTE"
+-$env:WHATSAPP_API_VERSION="VERSAO_SUPORTADA_NO_SEU_APP"
+-$env:WHATSAPP_TEMPLATE="alerta_estoque_megusta"
+-$env:WHATSAPP_LANGUAGE="pt_BR"
++$env:MAIL_TRANSPORT="smtp"
++$env:SMTP_HOST="smtp.gmail.com"
++$env:SMTP_PORT="587"
++$env:SMTP_USERNAME="sua.conta@gmail.com"
++$env:SMTP_PASSWORD="SENHA_DE_APP"
++$env:SMTP_FROM="sua.conta@gmail.com"
++$env:ALERTA_EMAIL_TO="henry.silva@sptech.school"
+ ./mvnw.cmd test
+ ./mvnw.cmd spring-boot:run
+ ```
+ 
+-Os placeholders devem ser substituídos. Não envie seu token no chat nem o versione. Também pode configurar as variáveis no Run Configuration da IDE. Não há carregamento automático de arquivo .env.
++Para usar SES, troque `MAIL_TRANSPORT` para `ses` e preencha `SES_REGION`,
++`SES_FROM` (identidade verificada) e `ALERTA_EMAIL_TO`.
+ 
+-O guest normalmente só funciona localmente no broker. Para acesso remoto, use usuário próprio. Em produção, habilite TLS conforme sua infraestrutura (`spring.rabbitmq.ssl.enabled=true` e certificados/porta apropriados).
++Nao versione credenciais. O `guest` do RabbitMQ so funciona localmente; para
++acesso remoto use um usuario proprio.
+ 
+-## 4. Testar o fluxo
++## 5. Testar o fluxo
+ 
+-1. Inicie RabbitMQ e o consumer com credenciais válidas.
+-2. Confirme a fila e o binding no painel RabbitMQ.
+-3. No backend, dispare o fluxo existente de estoque abaixo do mínimo para um destinatário de teste autorizado. Ou publique o conteúdo de exemplo-mensagem.json no exchange, com a routing key configurada e content_type application/json. Troque o telefone fictício por um número de teste com DDI + DDD + número, apenas dígitos.
+-4. A variável de template receberá: `Farinha (INS001): atual 2, mínimo 5`.
+-5. O log informa o ID retornado pela Meta. Isso significa ACEITO pela API, não confirmação de entrega no aparelho. Confirmação de entrega/leitura requer webhook da Meta, não incluído.
+-6. Para exercitar falha sem enviar nada, publique JSON inválido. Após três tentativas, a mensagem deve ir para megusta.whatsapp.alertas.dlq. Corrija o problema antes de republicar manualmente; não há reenvio automático da DLQ.
++1. Inicie o RabbitMQ e o consumer.
++2. Confirme a fila/binding no painel do RabbitMQ.
++3. Publique `exemplo-mensagem.json` no exchange, com a routing key
++   `alerta.estoque` e `content_type=application/json`; ou dispare o scheduler
++   do backend com algum insumo abaixo do minimo.
++4. O log deve mostrar o destinatario efetivo. No SES, o envio e aceito pela
++   API (o `messageId` aparece em DEBUG); isso nao confirma entrega na caixa.
++5. Para exercitar falha, publique JSON invalido. Apos 3 tentativas a mensagem
++   vai para a DLQ.
+ 
+ ## Erros e limites
+ 
+-- ACK automático somente após o listener retornar com sucesso; não é `autoAck` do protocolo RabbitMQ.
+-- Até três tentativas totais, com intervalos de 2 e 4 segundos. A rejeição final encaminha à DLQ declarada. Erros permanentes também usam essas três tentativas limitadas.
+-- Timeouts de conexão de 10 s e requisição de 30 s. Não imprime token, telefone nem corpo da resposta de erro. HTTP 400: revise template e parâmetros; 401/403: token/permissões; 429: limite; 5xx: indisponibilidade.
+-- Quantidades inválidas e listas vazias falham. Telefone deve conter DDI; o código não adivinha nem acrescenta 55. A validação sintática não confirma existência do número.
+-- Resumo limitado a 800 caracteres para o template sugerido. Excedentes vão à DLQ, sem truncar itens. Para muitos insumos, implemente divisão no producer, observando os limites do template aprovado.
+-- Pode haver DUPLICIDADE se a Meta aceitar o envio e houver timeout ou queda antes do ACK. O contrato original não tem ID de evento e esta implementação não promete exactly-once. Produção pode exigir eventId, registro persistente e reconciliação; deduplicação local sozinha não elimina a ambiguidade de uma chamada HTTP aceita sem resposta.
+-- DLQ durável auxilia inspeção, mas não substitui políticas de alta disponibilidade, backup e monitoramento do broker.
+-
+-## Validação desta entrega
+-
+-Contrato e código revisados contra os arquivos do producer anexado. Foram incluídos testes JUnit/Mockito para conversão do contrato (inclusive __TypeId__), erro de envio, JSON inválido e lista vazia. A tentativa de `./mvnw -B test` iniciou o Maven, mas falhou antes da compilação por erro de DNS ao acessar repo.maven.apache.org para resolver o parent Spring Boot 3.5.13. Portanto os testes NÃO foram executados. O ambiente também não possui JDK 21 configurado. Nenhuma mensagem real foi enviada e não houve teste integrado com RabbitMQ ou Meta. Execute `./mvnw.cmd test` e o roteiro acima no seu ambiente antes do uso.
+-
+-## Referências
+-
+-- https://docs.spring.io/spring-boot/reference/messaging/amqp.html
+-- https://docs.spring.io/spring-amqp/reference/amqp/resilience-recovering-from-errors-and-broker-failures.html
+-- https://developers.facebook.com/documentation/business-messaging/whatsapp/get-started
+-- https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/send-messages
+-- https://whatsapp.github.io/WhatsApp-Nodejs-SDK/api-reference/messages/template/
+-
+-## Comportamento do backend identificado
+-
+-`VerificacaoEstoqueScheduler` tem cron `0 0 7 * * *`: dispara às 7h no fuso da aplicação. Obtém somente o usuário mais recente (`findTopByOrderByIdDesc`) e publica para esse telefone.
+-
+-## Docker e Linux/macOS
+-
+-No Linux/macOS, use `./mvnw test` e `./mvnw spring-boot:run`, depois de exportar as variáveis equivalentes.
++- ACK automatico somente apos o listener retornar com sucesso.
++- Ate 3 tentativas, com intervalos de 2 e 4 segundos; a rejeicao final vai
++  para a DLQ.
++- Timeouts de 10 s (SMTP) e 30 s (cliente HTTP do SES, quando aplicavel).
++- Listas vazias, quantidades invalidas e e-mails invalidos falham.
++- O resumo e limitado a 800 caracteres; para muitos insumos, divida no producer.
++- Pode haver duplicidade se o SES aceitar o envio e houver timeout/queda antes
++  do ACK. O contrato nao tem ID de evento; nao ha exactly-once.
++- A DLQ ajuda na inspecao, mas nao substitui monitoramento e backup do broker.
+ 
+-Para compilar e executar via Docker (a construção também executa os testes):
++## Docker
+ 
+ ```sh
+ docker build -t megusta-consumer .
+ docker run --rm --env-file .env megusta-consumer
+ ```
+ 
+-Crie `.env` localmente com as mesmas variáveis da seção PowerShell, em linhas `CHAVE=valor`, sem `$env:`. Não o versione. Dentro de um container, `localhost` aponta para o próprio container: use o nome do serviço RabbitMQ na mesma rede Docker (`--network NOME_DA_REDE`) ou o endereço do broker. No Docker Desktop, um broker no computador host pode ser acessado por `host.docker.internal`. Não é necessário publicar porta para o consumer.
++Dentro do container, `localhost` e o proprio container: use o nome do servico
++RabbitMQ na mesma rede Docker. No Swarm, a infraestrutura injeta as variaveis e
++o `LabInstanceProfile` cuida das credenciais do SES.
+diff --git a/megusta-consumer/megusta-consumer/exemplo-mensagem.json b/megusta-consumer/megusta-consumer/exemplo-mensagem.json
+index bbd780c..f80eb89 100644
+--- a/megusta-consumer/megusta-consumer/exemplo-mensagem.json
++++ b/megusta-consumer/megusta-consumer/exemplo-mensagem.json
+@@ -1,1 +1,1 @@
+-{"telefone":"5511999999999","alertas":[{"nome":"Farinha","codigoInsumo":"INS001","qtdAtual":2.0,"estoqueMinimo":5.0}]}
+\ No newline at end of file
++{"email":"henry.silva@sptech.school","alertas":[{"nome":"Farinha","codigoInsumo":"INS001","qtdAtual":2.0,"estoqueMinimo":5.0}]}
+diff --git a/megusta-consumer/megusta-consumer/pom.xml b/megusta-consumer/megusta-consumer/pom.xml
+index be7e351..3b2f8d8 100644
+--- a/megusta-consumer/megusta-consumer/pom.xml
++++ b/megusta-consumer/megusta-consumer/pom.xml
+@@ -2,10 +2,26 @@
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.5.13</version><relativePath/></parent>
+  <groupId>school.sptech</groupId><artifactId>megusta-consumer</artifactId><version>1.0.0</version>
+- <properties><java.version>21</java.version></properties>
++ <properties>
++  <java.version>21</java.version>
++  <aws.sdk.version>2.57.8</aws.sdk.version>
++ </properties>
++ <dependencyManagement>
++  <dependencies>
++   <dependency>
++    <groupId>software.amazon.awssdk</groupId>
++    <artifactId>bom</artifactId>
++    <version>${aws.sdk.version}</version>
++    <type>pom</type>
++    <scope>import</scope>
++   </dependency>
++  </dependencies>
++ </dependencyManagement>
+  <dependencies>
+   <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-amqp</artifactId></dependency>
+   <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-json</artifactId></dependency>
++  <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-mail</artifactId></dependency>
++  <dependency><groupId>software.amazon.awssdk</groupId><artifactId>sesv2</artifactId></dependency>
+   <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+  </dependencies>
+  <build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build>
+diff --git a/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/AlertaEstoqueConsumer.java b/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/AlertaEstoqueConsumer.java
+index c6e81cb..9d48efa 100644
+--- a/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/AlertaEstoqueConsumer.java
++++ b/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/AlertaEstoqueConsumer.java
+@@ -1,26 +1,30 @@
+ package school.sptech.consumer;
++
+ import school.sptech.megusta.notificacao.AlertaEstoqueMensagem;
+ import com.fasterxml.jackson.databind.ObjectMapper;
+ import org.springframework.amqp.core.Message;
+ import org.springframework.amqp.rabbit.annotation.RabbitListener;
+ import org.springframework.stereotype.Component;
+-import org.slf4j.*;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
+ @Component
+ public class AlertaEstoqueConsumer {
+- private static final Logger log=LoggerFactory.getLogger(AlertaEstoqueConsumer.class);
+- private final ObjectMapper mapper;
+- private final WhatsAppService whatsapp;
+- public AlertaEstoqueConsumer(ObjectMapper mapper, WhatsAppService whatsapp) {
+-  this.mapper=mapper; this.whatsapp=whatsapp;
+- }
+- @RabbitListener(queues="${megusta.rabbitmq.queue}")
+- public void consumir(Message message) throws Exception {
++    private static final Logger log = LoggerFactory.getLogger(AlertaEstoqueConsumer.class);
++
++    private final ObjectMapper mapper;
++    private final EmailService email;
++
++    public AlertaEstoqueConsumer(ObjectMapper mapper, EmailService email) {
++        this.mapper = mapper;
++        this.email = email;
++    }
+ 
+-  AlertaEstoqueMensagem dto=mapper.readValue(message.getBody(), AlertaEstoqueMensagem.class);
+-  String resumo=MensagemFormatter.resumo(dto);
+-  String telefone=MensagemFormatter.telefone(dto.telefone());
+-  String id=whatsapp.enviar(telefone, resumo);
+-  log.info("Notificação aceita pela API do WhatsApp. ID: {}", id);
+-  
+- }
++    @RabbitListener(queues = "${megusta.rabbitmq.queue}")
++    public void consumir(Message message) throws Exception {
++        AlertaEstoqueMensagem dto = mapper.readValue(message.getBody(), AlertaEstoqueMensagem.class);
++        String resumo = MensagemFormatter.resumo(dto);
++        String destinatario = email.enviar(dto.email(), resumo);
++        log.info("Alerta de estoque enviado por e-mail para {}", destinatario);
++    }
+ }
+diff --git a/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/EmailService.java b/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/EmailService.java
+new file mode 100644
+index 0000000..e6b4ddc
+--- /dev/null
++++ b/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/EmailService.java
+@@ -0,0 +1,149 @@
++package school.sptech.consumer;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.mail.SimpleMailMessage;
++import org.springframework.mail.javamail.JavaMailSender;
++import org.springframework.stereotype.Service;
++import software.amazon.awssdk.regions.Region;
++import software.amazon.awssdk.services.sesv2.SesV2Client;
++import software.amazon.awssdk.services.sesv2.model.Body;
++import software.amazon.awssdk.services.sesv2.model.Content;
++import software.amazon.awssdk.services.sesv2.model.Destination;
++import software.amazon.awssdk.services.sesv2.model.EmailContent;
++import software.amazon.awssdk.services.sesv2.model.SendEmailRequest;
++import software.amazon.awssdk.services.sesv2.model.SendEmailResponse;
++import software.amazon.awssdk.services.sesv2.model.Message;
++
++import java.util.regex.Pattern;
++
++/**
++ * Envia os alertas de estoque por e-mail.
++ *
++ * <p>Transportes suportados:</p>
++ * <ul>
++ *   <li>{@code ses}: AWS SES v2, usando a cadeia padrao de credenciais. No
++ *       Swarm isso significa o LabInstanceProfile das instancias backend,
++ *       portanto nao ha senha de e-mail no ambiente.</li>
++ *   <li>{@code smtp}: SMTP generico via Spring Mail (Gmail, Microsoft 365 ou
++ *       SES SMTP), configurado por SMTP_*.</li>
++ * </ul>
++ */
++@Service
++public class EmailService {
++    private static final Logger log = LoggerFactory.getLogger(EmailService.class);
++    private static final Pattern EMAIL = Pattern.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
++    private static final String ASSUNTO = "MeGusta - alerta de estoque";
++
++    private final String transport;
++    private final String from;
++    private final String overrideTo;
++    private final JavaMailSender mailSender;
++    private final SesV2Client ses;
++
++    // @Autowired necessario porque existe um segundo construtor (visivel para
++    // os testes). Com mais de um construtor, o Spring nao escolhe sozinho.
++    @Autowired
++    public EmailService(
++            @Value("${megusta.email.transport:smtp}") String transport,
++            @Value("${megusta.email.from:}") String from,
++            @Value("${megusta.email.override-to:}") String overrideTo,
++            @Value("${megusta.email.ses-region:us-east-1}") String sesRegion,
++            ObjectProvider<JavaMailSender> mailSenderProvider) {
++        this(
++                transport,
++                from,
++                overrideTo,
++                mailSenderProvider.getIfAvailable(),
++                "ses".equalsIgnoreCase(trim(transport))
++                        ? SesV2Client.builder().region(Region.of(regiao(sesRegion))).build()
++                        : null
++        );
++    }
++
++    // Visivel para os testes: permite injetar JavaMailSender/SesV2Client sem rede.
++    EmailService(String transport, String from, String overrideTo,
++                 JavaMailSender mailSender, SesV2Client ses) {
++        this.transport = trim(transport).toLowerCase();
++        this.from = trim(from);
++        this.overrideTo = trim(overrideTo);
++        this.mailSender = mailSender;
++        this.ses = ses;
++
++        if (!"ses".equals(this.transport) && !"smtp".equals(this.transport)) {
++            throw new IllegalArgumentException(
++                    "MAIL_TRANSPORT invalido: " + this.transport + " (use ses ou smtp)");
++        }
++        if (!EMAIL.matcher(this.from).matches()) {
++            throw new IllegalArgumentException(
++                    "Configure o remetente (SES_FROM ou SMTP_FROM) com um e-mail valido: " + this.from);
++        }
++        if ("smtp".equals(this.transport) && this.mailSender == null) {
++            throw new IllegalArgumentException(
++                    "MAIL_TRANSPORT=smtp exige SMTP_HOST configurado (spring.mail.host)");
++        }
++        if ("ses".equals(this.transport) && this.ses == null) {
++            throw new IllegalArgumentException("MAIL_TRANSPORT=ses nao conseguiu criar o cliente SES");
++        }
++    }
++
++    /**
++     * Envia o resumo para o destinatario da mensagem ou para o override de teste.
++     *
++     * @return o destinatario efetivamente usado
++     */
++    public String enviar(String destinatario, String resumo) {
++        String to = destinatarioEfetivo(destinatario);
++        if (resumo == null || resumo.isBlank()) {
++            throw new IllegalArgumentException("Resumo vazio");
++        }
++
++        if ("ses".equals(transport)) {
++            SendEmailResponse response = ses.sendEmail(SendEmailRequest.builder()
++                    .fromEmailAddress(from)
++                    .destination(Destination.builder().toAddresses(to).build())
++                    .content(EmailContent.builder()
++                            .simple(Message.builder()
++                                    .subject(Content.builder().data(ASSUNTO).charset("UTF-8").build())
++                                    .body(Body.builder()
++                                            .text(Content.builder().data(resumo).charset("UTF-8").build())
++                                            .build())
++                                    .build())
++                            .build())
++                    .build());
++            log.debug("SES aceitou o e-mail. messageId={}", response.messageId());
++        } else {
++            SimpleMailMessage message = new SimpleMailMessage();
++            message.setFrom(from);
++            message.setTo(to);
++            message.setSubject(ASSUNTO);
++            message.setText(resumo);
++            mailSender.send(message);
++        }
++        return to;
++    }
++
++    /**
++     * Aplica o override de teste (ALERTA_EMAIL_TO) e valida o destinatario.
++     * Em producao o override fica vazio e vale o e-mail da mensagem.
++     */
++    public String destinatarioEfetivo(String destinatario) {
++        String to = overrideTo.isBlank() ? trim(destinatario) : overrideTo;
++        if (!EMAIL.matcher(to).matches()) {
++            throw new IllegalArgumentException("E-mail destinatario invalido: " + to);
++        }
++        return to;
++    }
++
++    private static String regiao(String value) {
++        String region = trim(value);
++        return region.isEmpty() ? "us-east-1" : region;
++    }
++
++    private static String trim(String value) {
++        return value == null ? "" : value.trim();
++    }
++}
+diff --git a/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/MensagemFormatter.java b/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/MensagemFormatter.java
+index fc84e57..da5bb17 100644
+--- a/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/MensagemFormatter.java
++++ b/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/MensagemFormatter.java
+@@ -1,30 +1,41 @@
+ package school.sptech.consumer;
++
+ import school.sptech.megusta.notificacao.AlertaEstoqueMensagem;
++
+ import java.math.BigDecimal;
+ import java.util.stream.Collectors;
++
+ public final class MensagemFormatter {
+- private MensagemFormatter() {}
+- public static String telefone(String value) {
+-  if (value == null || !value.matches("[+0-9() .-]+")) throw new IllegalArgumentException("Telefone inválido");
+-  String digits = value.replaceAll("[^0-9]", "");
+-  if (!digits.matches("[1-9][0-9]{7,14}")) throw new IllegalArgumentException("Use telefone internacional com DDI");
+-  return digits;
+- }
+- public static String resumo(AlertaEstoqueMensagem m) {
+-  if (m == null || m.alertas() == null || m.alertas().isEmpty()) throw new IllegalArgumentException("Alertas vazios");
+-  for (var a : m.alertas()) {
+-   if (a == null || a.nome() == null || a.nome().isBlank() || a.codigoInsumo() == null
+-       || a.qtdAtual() == null || a.estoqueMinimo() == null
+-       || !Double.isFinite(a.qtdAtual()) || !Double.isFinite(a.estoqueMinimo())
+-       || a.qtdAtual() < 0 || a.estoqueMinimo() < 0)
+-    throw new IllegalArgumentException("Alerta inválido");
+-  }
+-  String result = m.alertas().stream().map(a -> limpar(a.nome()) + " (" + limpar(a.codigoInsumo())
+-      + "): atual " + numero(a.qtdAtual()) + ", mínimo " + numero(a.estoqueMinimo()))
+-      .collect(Collectors.joining("; "));
+-  if (result.length() > 800) throw new IllegalArgumentException("Resumo excede 800 caracteres; dividir no producer");
+-  return result;
+- }
+- private static String limpar(String s) { return s.replaceAll("\\s+", " ").trim(); }
+- private static String numero(Double n) { return BigDecimal.valueOf(n).stripTrailingZeros().toPlainString().replace('.', ','); }
++    private MensagemFormatter() {
++    }
++
++    public static String resumo(AlertaEstoqueMensagem m) {
++        if (m == null || m.alertas() == null || m.alertas().isEmpty()) {
++            throw new IllegalArgumentException("Alertas vazios");
++        }
++        for (var a : m.alertas()) {
++            if (a == null || a.nome() == null || a.nome().isBlank() || a.codigoInsumo() == null
++                    || a.qtdAtual() == null || a.estoqueMinimo() == null
++                    || !Double.isFinite(a.qtdAtual()) || !Double.isFinite(a.estoqueMinimo())
++                    || a.qtdAtual() < 0 || a.estoqueMinimo() < 0) {
++                throw new IllegalArgumentException("Alerta invalido");
++            }
++        }
++        String result = m.alertas().stream()
++                .map(a -> limpar(a.nome()) + " (" + limpar(a.codigoInsumo())
++                        + "): atual " + numero(a.qtdAtual()) + ", minimo " + numero(a.estoqueMinimo()))
++                .collect(Collectors.joining("; "));
++        if (result.length() > 800) {
++            throw new IllegalArgumentException("Resumo excede 800 caracteres; dividir no producer");
++        }
++        return result;
++    }
++
++    private static String limpar(String s) {
++        return s.replaceAll("\\s+", " ").trim();
++    }
++
++    private static String numero(Double n) {
++        return BigDecimal.valueOf(n).stripTrailingZeros().toPlainString().replace('.', ',');
++    }
+ }
+diff --git a/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/WhatsAppService.java b/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/WhatsAppService.java
+deleted file mode 100644
+index 5083d11..0000000
+--- a/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/WhatsAppService.java
++++ /dev/null
+@@ -1,41 +0,0 @@
+-package school.sptech.consumer;
+-import com.fasterxml.jackson.databind.ObjectMapper;
+-import org.springframework.beans.factory.annotation.Value;
+-import org.springframework.stereotype.Service;
+-import java.net.URI;
+-import java.net.http.*;
+-import java.time.Duration;
+-import java.util.*;
+-@Service
+-public class WhatsAppService {
+- private final ObjectMapper mapper;
+- private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+- private final String token, template, language;
+- private final URI endpoint;
+- public WhatsAppService(ObjectMapper mapper, @Value("${whatsapp.token}") String token,
+-     @Value("${whatsapp.phone-number-id}") String phoneId, @Value("${whatsapp.api-version}") String version,
+-     @Value("${whatsapp.template}") String template, @Value("${whatsapp.language}") String language) {
+-  if (token.isBlank() || template.isBlank() || language.isBlank()
+-      || !phoneId.matches("[0-9]+") || !version.matches("v[0-9]+\\.[0-9]+"))
+-   throw new IllegalArgumentException("Configure as variáveis WHATSAPP_* corretamente");
+-  this.mapper=mapper; this.token=token; this.template=template; this.language=language;
+-  endpoint=URI.create("https://graph.facebook.com/" + version + "/" + phoneId + "/messages");
+- }
+- public String enviar(String telefone, String resumo) throws Exception {
+-  var payload = Map.of("messaging_product", "whatsapp", "to", telefone, "type", "template",
+-      "template", Map.of("name", template, "language", Map.of("code", language),
+-          "components", List.of(Map.of("type", "body", "parameters",
+-              List.of(Map.of("type", "text", "text", resumo))))));
+-  var request = HttpRequest.newBuilder(endpoint).timeout(Duration.ofSeconds(30))
+-      .header("Authorization", "Bearer " + token).header("Content-Type", "application/json")
+-      .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(payload))).build();
+-  HttpResponse<String> response;
+-  try { response = client.send(request, HttpResponse.BodyHandlers.ofString()); }
+-  catch (InterruptedException e) { Thread.currentThread().interrupt(); throw e; }
+-  if (response.statusCode() < 200 || response.statusCode() >= 300)
+-   throw new IllegalStateException("WhatsApp recusou envio. HTTP " + response.statusCode());
+-  String id=mapper.readTree(response.body()).path("messages").path(0).path("id").asText();
+-  if (id.isBlank()) throw new IllegalStateException("WhatsApp não retornou ID de mensagem");
+-  return id;
+- }
+-}
+diff --git a/megusta-consumer/megusta-consumer/src/main/java/school/sptech/megusta/notificacao/AlertaEstoqueMensagem.java b/megusta-consumer/megusta-consumer/src/main/java/school/sptech/megusta/notificacao/AlertaEstoqueMensagem.java
+index 63d269a..912cb9c 100644
+--- a/megusta-consumer/megusta-consumer/src/main/java/school/sptech/megusta/notificacao/AlertaEstoqueMensagem.java
++++ b/megusta-consumer/megusta-consumer/src/main/java/school/sptech/megusta/notificacao/AlertaEstoqueMensagem.java
+@@ -2,9 +2,14 @@ package school.sptech.megusta.notificacao;
+ 
+ import java.util.List;
+ 
+-
++/**
++ * Contrato da mensagem consumida do RabbitMQ.
++ *
++ * <p>O backend publica o e-mail do destinatario na raiz e a lista de insumos
++ * abaixo do minimo em {@code alertas}.</p>
++ */
+ public record AlertaEstoqueMensagem(
+-        String telefone,
++        String email,
+         List<AlertaEstoque> alertas
+ ) {
+ }
+diff --git a/megusta-consumer/megusta-consumer/src/main/resources/application.properties b/megusta-consumer/megusta-consumer/src/main/resources/application.properties
+index 87f6de3..a00f411 100644
+--- a/megusta-consumer/megusta-consumer/src/main/resources/application.properties
++++ b/megusta-consumer/megusta-consumer/src/main/resources/application.properties
+@@ -15,9 +15,26 @@ spring.rabbitmq.listener.simple.retry.multiplier=2
+ spring.rabbitmq.listener.simple.retry.max-interval=10s
+ megusta.rabbitmq.exchange=${RABBITMQ_EXCHANGE:megusta.estoque}
+ megusta.rabbitmq.routing-key=${RABBITMQ_ROUTING_KEY:alerta.estoque}
+-megusta.rabbitmq.queue=${RABBITMQ_QUEUE:megusta.whatsapp.alertas}
+-whatsapp.token=${WHATSAPP_TOKEN}
+-whatsapp.phone-number-id=${WHATSAPP_PHONE_NUMBER_ID}
+-whatsapp.api-version=${WHATSAPP_API_VERSION}
+-whatsapp.template=${WHATSAPP_TEMPLATE}
+-whatsapp.language=${WHATSAPP_LANGUAGE:pt_BR}
++megusta.rabbitmq.queue=${RABBITMQ_QUEUE:megusta.email.alertas}
++
++# --- E-mail -------------------------------------------------------------------
++# ses  = AWS SES v2 API (credenciais padrao: LabInstanceProfile no Swarm)
++# smtp = SMTP generico (Gmail/Microsoft 365/SES SMTP)
++megusta.email.transport=${MAIL_TRANSPORT:smtp}
++megusta.email.ses-region=${SES_REGION:us-east-1}
++# SES_FROM tem prioridade; SMTP_FROM e o fallback no modo smtp.
++megusta.email.from=${SES_FROM:${SMTP_FROM:}}
++megusta.email.override-to=${ALERTA_EMAIL_TO:}
++
++spring.mail.host=${SMTP_HOST:}
++spring.mail.port=${SMTP_PORT:587}
++spring.mail.username=${SMTP_USERNAME:}
++spring.mail.password=${SMTP_PASSWORD:}
++spring.mail.default-encoding=UTF-8
++spring.mail.properties.mail.smtp.auth=${SMTP_AUTH:true}
++spring.mail.properties.mail.smtp.starttls.enable=${SMTP_STARTTLS:true}
++spring.mail.properties.mail.smtp.starttls.required=${SMTP_STARTTLS:true}
++spring.mail.properties.mail.smtp.ssl.enable=${SMTP_SSL:false}
++spring.mail.properties.mail.smtp.connectiontimeout=10000
++spring.mail.properties.mail.smtp.timeout=10000
++spring.mail.properties.mail.smtp.writetimeout=10000
+diff --git a/megusta-consumer/megusta-consumer/src/test/java/school/sptech/consumer/ConsumerTest.java b/megusta-consumer/megusta-consumer/src/test/java/school/sptech/consumer/ConsumerTest.java
+index c8b1134..43aef07 100644
+--- a/megusta-consumer/megusta-consumer/src/test/java/school/sptech/consumer/ConsumerTest.java
++++ b/megusta-consumer/megusta-consumer/src/test/java/school/sptech/consumer/ConsumerTest.java
+@@ -1,35 +1,74 @@
+ package school.sptech.consumer;
++
+ import com.fasterxml.jackson.databind.ObjectMapper;
+ import org.junit.jupiter.api.Test;
+-import org.springframework.amqp.core.*;
+-import static org.junit.jupiter.api.Assertions.*;
+-import static org.mockito.Mockito.*;
++import org.springframework.amqp.core.Message;
++import org.springframework.amqp.core.MessageProperties;
++
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoInteractions;
++import static org.mockito.Mockito.when;
++
+ class ConsumerTest {
+- private final ObjectMapper mapper=new ObjectMapper();
+- private Message message(String body) { return new Message(body.getBytes(java.nio.charset.StandardCharsets.UTF_8), new MessageProperties()); }
+- private final String json="""
+- {"telefone":"+55 (11) 99999-9999","alertas":[{"nome":"Farinha","codigoInsumo":"INS001","qtdAtual":2,"estoqueMinimo":5}]}
+- """;
+- @Test void converteContratoDoProducerEEnvia() throws Exception {
+-  var service=mock(WhatsAppService.class);
+-  var msg=message(json);
+-  msg.getMessageProperties().setHeader("__TypeId__", "school.sptech.megusta.notificacao.AlertaEstoqueMensagem");
+-  new AlertaEstoqueConsumer(mapper, service).consumir(msg);
+-  verify(service).enviar("5511999999999", "Farinha (INS001): atual 2, mínimo 5");
+- }
+- @Test void falhaDeEnvioPropagaParaRetry() throws Exception {
+-  var service=mock(WhatsAppService.class);
+-  doThrow(new IllegalStateException("HTTP 503")).when(service).enviar(anyString(), anyString());
+-  assertThrows(IllegalStateException.class, () -> new AlertaEstoqueConsumer(mapper,service).consumir(message(json)));
+- }
+- @Test void jsonInvalidoNaoEnvia() {
+-  var service=mock(WhatsAppService.class);
+-  assertThrows(Exception.class, () -> new AlertaEstoqueConsumer(mapper,service).consumir(message("arquivo inválido")));
+-  verifyNoInteractions(service);
+- }
+- @Test void listaVaziaNaoEnvia() {
+-  var service=mock(WhatsAppService.class);
+-  assertThrows(IllegalArgumentException.class, () -> new AlertaEstoqueConsumer(mapper,service).consumir(message("{\"telefone\":\"5511999999999\",\"alertas\":[]}")));
+-  verifyNoInteractions(service);
+- }
++    private final ObjectMapper mapper = new ObjectMapper();
++
++    private Message message(String body) {
++        return new Message(body.getBytes(java.nio.charset.StandardCharsets.UTF_8), new MessageProperties());
++    }
++
++    private final String json = """
++            {"email":"henry.silva@sptech.school","alertas":[{"nome":"Farinha","codigoInsumo":"INS001","qtdAtual":2,"estoqueMinimo":5}]}
++            """;
++
++    @Test
++    void converteContratoDoProducerEEnvia() throws Exception {
++        var service = mock(EmailService.class);
++        when(service.enviar(anyString(), anyString())).thenReturn("henry.silva@sptech.school");
++        var msg = message(json);
++        msg.getMessageProperties().setHeader("__TypeId__", "school.sptech.megusta.notificacao.AlertaEstoqueMensagem");
++        new AlertaEstoqueConsumer(mapper, service).consumir(msg);
++        verify(service).enviar(eq("henry.silva@sptech.school"),
++                eq("Farinha (INS001): atual 2, minimo 5"));
++    }
++
++    @Test
++    void falhaDeEnvioPropagaParaRetry() throws Exception {
++        var service = mock(EmailService.class);
++        doThrow(new IllegalStateException("SES indisponivel"))
++                .when(service).enviar(anyString(), anyString());
++        assertThrows(IllegalStateException.class,
++                () -> new AlertaEstoqueConsumer(mapper, service).consumir(message(json)));
++    }
++
++    @Test
++    void jsonInvalidoNaoEnvia() {
++        var service = mock(EmailService.class);
++        assertThrows(Exception.class,
++                () -> new AlertaEstoqueConsumer(mapper, service).consumir(message("arquivo invalido")));
++        verifyNoInteractions(service);
++    }
++
++    @Test
++    void listaVaziaNaoEnvia() {
++        var service = mock(EmailService.class);
++        assertThrows(IllegalArgumentException.class,
++                () -> new AlertaEstoqueConsumer(mapper, service).consumir(
++                        message("{\"email\":\"henry.silva@sptech.school\",\"alertas\":[]}")));
++        verifyNoInteractions(service);
++    }
++
++    @Test
++    void emailInvalidoNaoEnvia() throws Exception {
++        var service = mock(EmailService.class);
++        when(service.enviar(anyString(), anyString()))
++                .thenThrow(new IllegalArgumentException("E-mail destinatario invalido"));
++        assertThrows(IllegalArgumentException.class,
++                () -> new AlertaEstoqueConsumer(mapper, service).consumir(
++                        message("{\"email\":\"sem-arroba\",\"alertas\":[{\"nome\":\"Farinha\",\"codigoInsumo\":\"INS001\",\"qtdAtual\":2,\"estoqueMinimo\":5}]}")));
++    }
+ }
+diff --git a/megusta-consumer/megusta-consumer/src/test/java/school/sptech/consumer/EmailServiceTest.java b/megusta-consumer/megusta-consumer/src/test/java/school/sptech/consumer/EmailServiceTest.java
+new file mode 100644
+index 0000000..f546eed
+--- /dev/null
++++ b/megusta-consumer/megusta-consumer/src/test/java/school/sptech/consumer/EmailServiceTest.java
+@@ -0,0 +1,76 @@
++package school.sptech.consumer;
++
++import org.junit.jupiter.api.Test;
++import org.mockito.ArgumentCaptor;
++import org.springframework.mail.SimpleMailMessage;
++import org.springframework.mail.javamail.JavaMailSender;
++import software.amazon.awssdk.services.sesv2.SesV2Client;
++import software.amazon.awssdk.services.sesv2.model.SendEmailRequest;
++import software.amazon.awssdk.services.sesv2.model.SendEmailResponse;
++
++import java.util.List;
++
++import static org.junit.jupiter.api.Assertions.assertArrayEquals;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++class EmailServiceTest {
++
++    @Test
++    void enviaPorSesComRemetenteEDestinatarioCorretos() {
++        SesV2Client ses = mock(SesV2Client.class);
++        when(ses.sendEmail(any(SendEmailRequest.class)))
++                .thenReturn(SendEmailResponse.builder().messageId("id-1").build());
++        var service = new EmailService("ses", "alertas@megusta.com", "", null, ses);
++
++        assertEquals("destino@exemplo.com", service.enviar("destino@exemplo.com", "resumo"));
++
++        var captor = ArgumentCaptor.forClass(SendEmailRequest.class);
++        verify(ses).sendEmail(captor.capture());
++        SendEmailRequest request = captor.getValue();
++        assertEquals("alertas@megusta.com", request.fromEmailAddress());
++        assertEquals(List.of("destino@exemplo.com"), request.destination().toAddresses());
++        assertEquals("MeGusta - alerta de estoque", request.content().simple().subject().data());
++        assertEquals("resumo", request.content().simple().body().text().data());
++    }
++
++    @Test
++    void smtpUsaOverrideDeTesteNoLugarDoDestinatarioDaMensagem() {
++        JavaMailSender mail = mock(JavaMailSender.class);
++        var service = new EmailService("smtp", "from@exemplo.com",
++                "henry.silva@sptech.school", mail, null);
++
++        assertEquals("henry.silva@sptech.school", service.enviar("outro@exemplo.com", "resumo"));
++
++        var captor = ArgumentCaptor.forClass(SimpleMailMessage.class);
++        verify(mail).send(captor.capture());
++        assertArrayEquals(new String[]{"henry.silva@sptech.school"}, captor.getValue().getTo());
++        assertEquals("from@exemplo.com", captor.getValue().getFrom());
++        assertEquals("MeGusta - alerta de estoque", captor.getValue().getSubject());
++        assertEquals("resumo", captor.getValue().getText());
++    }
++
++    @Test
++    void rejeitaDestinatarioInvalido() {
++        SesV2Client ses = mock(SesV2Client.class);
++        var service = new EmailService("ses", "alertas@megusta.com", "", null, ses);
++        assertThrows(IllegalArgumentException.class, () -> service.enviar("sem-arroba", "resumo"));
++    }
++
++    @Test
++    void rejeitaRemetenteVazio() {
++        assertThrows(IllegalArgumentException.class,
++                () -> new EmailService("ses", "", "", null, mock(SesV2Client.class)));
++    }
++
++    @Test
++    void rejeitaTransporteDesconhecido() {
++        assertThrows(IllegalArgumentException.class,
++                () -> new EmailService("fax", "alertas@megusta.com", "",
++                        (JavaMailSender) null, (SesV2Client) null));
++    }
++}

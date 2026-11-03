@@ -14,6 +14,7 @@ set -euo pipefail
 GITHUB_FRONTEND_REPO="${GITHUB_FRONTEND_REPO:-https://github.com/Miralhaz/me-gusta-frontend.git}"
 GITHUB_BACKEND_REPO="${GITHUB_BACKEND_REPO:-https://github.com/Miralhaz/me-gusta-backend.git}"
 GITHUB_DATABASE_REPO="${GITHUB_DATABASE_REPO:-https://github.com/Miralhaz/me-gusta-database.git}"
+GITHUB_CONSUMER_REPO="${GITHUB_CONSUMER_REPO:-https://github.com/Miralhaz/me-gusta-microsservico.git}"
 GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
 PUSH_TO_REGISTRY="${PUSH_TO_REGISTRY:-false}"
 REGISTRY="${REGISTRY:-}"
@@ -62,14 +63,17 @@ SRC_DIR="/opt/megusta/src"
 FRONTEND_SRC_DIR="$SRC_DIR/me-gusta-frontend"
 BACKEND_SRC_DIR="$SRC_DIR/me-gusta-backend"
 DATABASE_SRC_DIR="$SRC_DIR/me-gusta-database"
+CONSUMER_SRC_DIR="$SRC_DIR/me-gusta-microsservico"
 
 # Diretórios de build (o código fica em subpastas dos repos clonados)
 #   - frontend: <repo>/me-gusta-frontend
 #   - backend:  <repo>/megusta
 #   - database: <repo> (raiz; recebe o Dockerfile + config/ da infra)
+#   - consumer: <repo>/megusta-consumer/megusta-consumer
 FRONTEND_BUILD_DIR="$FRONTEND_SRC_DIR/me-gusta-frontend"
 BACKEND_BUILD_DIR="$BACKEND_SRC_DIR/megusta"
 DATABASE_BUILD_DIR="$DATABASE_SRC_DIR"
+CONSUMER_BUILD_DIR="$CONSUMER_SRC_DIR/megusta-consumer/megusta-consumer"
 
 # Salva diretório original
 ORIGINAL_DIR=$(pwd)
@@ -95,12 +99,14 @@ FRONTEND_IMAGE=$(get_image_name "megusta-frontend")
 BACKEND_IMAGE=$(get_image_name "megusta-backend")
 DATABASE_IMAGE=$(get_image_name "megusta-database")
 RABBITMQ_IMAGE=$(get_image_name "megusta-rabbitmq")
+CONSUMER_IMAGE=$(get_image_name "megusta-consumer")
 
 log "=== MeGusta Build Images ==="
 log "Frontend: $FRONTEND_IMAGE"
 log "Backend:  $BACKEND_IMAGE"
 log "Database: $DATABASE_IMAGE"
 log "RabbitMQ: $RABBITMQ_IMAGE"
+log "Consumer: $CONSUMER_IMAGE"
 log "Branch:   $GITHUB_BRANCH"
 log "Push:     $PUSH_TO_REGISTRY"
 [[ -n "$REGISTRY" ]] && log "Registry: $REGISTRY"
@@ -137,9 +143,36 @@ sync_repo() {
 sync_repo "$GITHUB_FRONTEND_REPO" "$FRONTEND_SRC_DIR" "Frontend"
 sync_repo "$GITHUB_BACKEND_REPO" "$BACKEND_SRC_DIR" "Backend"
 sync_repo "$GITHUB_DATABASE_REPO" "$DATABASE_SRC_DIR" "Database"
+sync_repo "$GITHUB_CONSUMER_REPO" "$CONSUMER_SRC_DIR" "Consumer"
 
 # Volta ao diretório original
 cd "$ORIGINAL_DIR"
+
+# =============================================================================
+# PATCH TRANSITÓRIO DO CONSUMER (WHATSAPP -> E-MAIL)
+# =============================================================================
+# Mesmo patch aplicado pelo deploy-swarm.sh (config/patches/). Ignorado quando o
+# repo oficial já está migrado (sem WhatsAppService.java).
+apply_consumer_email_patch() {
+    local patch="$SCRIPT_DIR/patches/consumer-email.patch"
+    [[ -f "$patch" ]] || return 0
+
+    local whatsapp_file="$CONSUMER_BUILD_DIR/src/main/java/school/sptech/consumer/WhatsAppService.java"
+    if [[ ! -f "$whatsapp_file" ]]; then
+        log "Consumer já está no molde de e-mail; patch transitório ignorado."
+        return 0
+    fi
+
+    if git -C "$CONSUMER_SRC_DIR" apply --check "$patch" 2>/dev/null; then
+        git -C "$CONSUMER_SRC_DIR" apply "$patch"
+        success "Patch transitório de e-mail aplicado ao consumer."
+    else
+        error "Falha ao aplicar $patch. Atualize o consumer manualmente antes do build."
+        exit 1
+    fi
+}
+
+apply_consumer_email_patch
 
 # =============================================================================
 # BUILD IMAGES
@@ -171,6 +204,7 @@ ensure_dockerfiles() {
     cp "$infra_dir/docker/nginx.conf" "$FRONTEND_BUILD_DIR/nginx.conf" 2>/dev/null || true
     cp "$infra_dir/docker/backend.Dockerfile" "$BACKEND_BUILD_DIR/Dockerfile" 2>/dev/null || cp "$infra_dir/backend.Dockerfile" "$BACKEND_BUILD_DIR/Dockerfile" 2>/dev/null || true
     cp "$infra_dir/docker/Dockerfile.database" "$DATABASE_BUILD_DIR/Dockerfile" 2>/dev/null || true
+    cp "$infra_dir/docker/consumer.Dockerfile" "$CONSUMER_BUILD_DIR/Dockerfile" 2>/dev/null || true
     mkdir -p "$DATABASE_BUILD_DIR/config/docker/config/mysql" "$DATABASE_BUILD_DIR/config/docker/init-scripts" "$DATABASE_BUILD_DIR/config/docker/scripts" 2>/dev/null || true
     cp "$infra_dir/docker/config/mysql/custom.cnf" "$DATABASE_BUILD_DIR/config/docker/config/mysql/custom.cnf" 2>/dev/null || true
     cp "$infra_dir/docker/init-scripts/01-schema.sql" "$DATABASE_BUILD_DIR/config/docker/init-scripts/01-schema.sql" 2>/dev/null || true
@@ -196,6 +230,10 @@ build_image "$DATABASE_BUILD_DIR" "$DATABASE_BUILD_DIR/Dockerfile" "$DATABASE_IM
 log "Building RabbitMQ..."
 build_image "$SCRIPT_DIR/docker/rabbitmq" "$SCRIPT_DIR/docker/rabbitmq/Dockerfile" "$RABBITMQ_IMAGE"
 
+# Consumer (Maven -> JRE) - contexto: <repo>/megusta-consumer/megusta-consumer
+log "Building Consumer..."
+build_image "$CONSUMER_BUILD_DIR" "$CONSUMER_BUILD_DIR/Dockerfile" "$CONSUMER_IMAGE"
+
 # =============================================================================
 # PUSH TO REGISTRY (se solicitado)
 # =============================================================================
@@ -209,7 +247,7 @@ if [[ "$PUSH_TO_REGISTRY" == true ]]; then
     log "Fazendo login no registry..."
     # Assume que docker login já foi feito (ex: aws ecr get-login-password)
     
-    for img in "$FRONTEND_IMAGE" "$BACKEND_IMAGE" "$DATABASE_IMAGE" "$RABBITMQ_IMAGE"; do
+    for img in "$FRONTEND_IMAGE" "$BACKEND_IMAGE" "$DATABASE_IMAGE" "$RABBITMQ_IMAGE" "$CONSUMER_IMAGE"; do
         log "Pushing $img..."
         docker push "$img"
         success "$img pushed"
@@ -223,6 +261,7 @@ echo "  $FRONTEND_IMAGE"
 echo "  $BACKEND_IMAGE"
 echo "  $DATABASE_IMAGE"
 echo "  $RABBITMQ_IMAGE"
+echo "  $CONSUMER_IMAGE"
 
 if [[ "$PUSH_TO_REGISTRY" == true ]]; then
     echo ""
@@ -231,4 +270,5 @@ if [[ "$PUSH_TO_REGISTRY" == true ]]; then
     echo "  image: $BACKEND_IMAGE"
     echo "  image: $DATABASE_IMAGE"
     echo "  image: $RABBITMQ_IMAGE"
+    echo "  image: $CONSUMER_IMAGE"
 fi

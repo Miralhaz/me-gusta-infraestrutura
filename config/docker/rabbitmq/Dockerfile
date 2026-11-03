@@ -10,8 +10,12 @@
 # =============================================================================
 FROM rabbitmq:4-management-alpine
 
-# Configuração (vhost, usuário default, cluster formation, quorum queues)
+# Configuração (vhost, usuário default, listeners, limites de recurso).
+#
+# NÃO copie nem carregue definitions.json: no RabbitMQ 4.4.x o import via
+# `management.load_definitions` trava o boot em "Importing concurrently 1
+# users..." (reproduzido com a imagem oficial). A topologia é declarada pelos
+# próprios serviços: o backend cria o exchange "megusta.estoque" e o consumer
+# cria a fila "megusta.email.alertas", o binding e a DLQ. O usuário admin e o
+# vhost "/" vêm de default_user/default_pass/default_vhost no rabbitmq.conf.
 COPY rabbitmq.conf /etc/rabbitmq/rabbitmq.conf
-
-# Filas, exchange, bindings e policy de HA (quorum)
-COPY definitions.json /etc/rabbitmq/definitions.json

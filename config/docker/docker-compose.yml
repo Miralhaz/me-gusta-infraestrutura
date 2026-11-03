@@ -86,6 +86,10 @@ services:
       - RABBITMQ_PORT=5672
       - RABBITMQ_USERNAME=admin
       - RABBITMQ_PASSWORD=admin
+      # Contrato com o consumer (mesmos defaults do application.properties).
+      # Declarados explicitamente para evitar divergencia entre publisher e consumer.
+      - RABBITMQ_EXCHANGE=megusta.estoque
+      - RABBITMQ_ROUTING_KEY=alerta.estoque
     networks:
       - megusta-net
     logging:
@@ -129,6 +133,104 @@ services:
       start_period: 90s
     labels:
       - "megusta.service=backend"
+      - "megusta.version=1.0"
+
+  # -----------------------------------------------------------------------------
+  # CONSUMER - Spring Boot (2 replicas, one per backend worker)
+  # -----------------------------------------------------------------------------
+  # Worker independente: NAO expoe porta HTTP e NAO acessa o MySQL. Ele consome
+  # a fila do RabbitMQ e envia e-mail por um destes transportes:
+  #   MAIL_TRANSPORT=smtp -> [padrao no AWS Academy] SMTP generico (Gmail,
+  #                          Microsoft 365 ou SES SMTP), com SMTP_USERNAME/
+  #                          SMTP_PASSWORD no config/.env.
+  #   MAIL_TRANSPORT=ses  -> AWS SES API com as credenciais temporarias do
+  #                          LabInstanceProfile das instancias backend. So
+  #                          funciona em conta cuja role permita SES.
+  #
+  # O contrato (exchange, routing key e fila) precisa bater com o backend:
+  #   backend publica -> exchange "megusta.estoque" / routing key "alerta.estoque"
+  #   consumer declara a fila "megusta.email.alertas" e o binding dessa key.
+  #
+  # SES_FROM (transporte ses) ou SMTP_HOST/SMTP_FROM (transporte smtp) sao
+  # obrigatorios; o deploy-swarm.sh valida conforme o transporte escolhido.
+  # -----------------------------------------------------------------------------
+  consumer:
+    image: megusta-consumer:latest
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USERNAME=admin
+      - RABBITMQ_PASSWORD=admin
+      - RABBITMQ_VHOST=/
+      - RABBITMQ_EXCHANGE=megusta.estoque
+      - RABBITMQ_ROUTING_KEY=alerta.estoque
+      - RABBITMQ_QUEUE=megusta.email.alertas
+      # --- Transporte de e-mail ---
+      - MAIL_TRANSPORT=${MAIL_TRANSPORT:-smtp}
+      # SES API (opcional; credenciais vem do instance profile, nao use chaves no .env)
+      - SES_REGION=${SES_REGION:-us-east-1}
+      # Remetente resolvido pelo deploy-swarm.sh (SES_FROM > SMTP_FROM). O Docker
+      # NAO suporta interpolação aninhada ${A:-${B:-}}, por isso o fallback e
+      # feito no bash e aqui so interpolamos um nivel.
+      - MEGUSTA_EMAIL_FROM=${MEGUSTA_EMAIL_FROM:-}
+      # SMTP generico (transporte padrao)
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_AUTH=${SMTP_AUTH:-true}
+      - SMTP_STARTTLS=${SMTP_STARTTLS:-true}
+      # true apenas para porta 465 (SSL direto). Na 587 use STARTTLS.
+      - SMTP_SSL=${SMTP_SSL:-false}
+      # Destinatario fixo opcional: quando preenchido, TODO alerta vai para este
+      # e-mail, ignorando o campo "email" da mensagem. Use so em teste/homolog.
+      # Em producao deixe vazio para respeitar o destinatario do banco.
+      - ALERTA_EMAIL_TO=${ALERTA_EMAIL_TO:-}
+      # O container tem limite de 512M; 60% evita que a JVM assuma os 25%
+      # default (128M) e fique apertada para o Spring Boot.
+      - JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=60.0
+      - LOGGING_LEVEL_ROOT=INFO
+      - LOGGING_LEVEL_SCHOOL_SPTECH=INFO
+    networks:
+      - megusta-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      # Duas replicas compartilham a MESMA fila: o RabbitMQ faz round-robin,
+      # portanto cada mensagem e entregue a apenas um consumer.
+      replicas: 2
+      placement:
+        constraints:
+          # Roda nos mesmos nos do backend (role=backend), um por AZ.
+          - node.labels.role == backend
+        preferences:
+          - spread: node.labels.az
+      restart_policy:
+        # condition=any + max_attempts=0: se o RabbitMQ ainda nao estiver pronto
+        # (ou faltar configuracao), o Swarm continua tentando em vez de desistir
+        # apos 3 falhas.
+        condition: any
+        delay: 10s
+        max_attempts: 0
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    labels:
+      - "megusta.service=consumer"
       - "megusta.version=1.0"
 
   # -----------------------------------------------------------------------------
@@ -189,7 +291,14 @@ services:
       - "megusta.version=1.0"
 
   # -----------------------------------------------------------------------------
-  # RABBITMQ - Message Broker (2 replicas for HA, one per AZ)
+  # RABBITMQ - Message Broker (1 replica)
+  # -----------------------------------------------------------------------------
+  # IMPORTANTE: ate este deploy o servico subia com 2 replicas, mas elas NAO
+  # formavam cluster (os hostnames dos containers mudam a cada task, e o
+  # rabbitmq.conf aponta para rabbit@rabbitmq-1/2). Com o consumer, isso seria
+  # pior: o VIP "rabbitmq" poderia entregar o publisher em um broker e o
+  # consumer em outro, perdendo mensagens. Enquanto um cluster real nao for
+  # implementado, mantemos 1 broker unico e funcional.
   # -----------------------------------------------------------------------------
   rabbitmq:
     image: megusta-rabbitmq:latest
@@ -199,8 +308,9 @@ services:
       - RABBITMQ_DEFAULT_VHOST=/
       - RABBITMQ_ERLANG_COOKIE=megusta_erlang_cookie_secret_2024
     volumes:
-      # A config (rabbitmq.conf + definitions.json) vem embutida na imagem
-      # (megusta-rabbitmq), evitando bind mounts com caminhos relativos.
+      # A config (rabbitmq.conf) vem embutida na imagem (megusta-rabbitmq),
+      # evitando bind mounts com caminhos relativos. A topologia (exchange,
+      # fila, binding, DLQ) e declarada pelos proprios servicos no startup.
       - rabbitmq_data:/var/lib/rabbitmq
       - rabbitmq_logs:/var/log/rabbitmq
     networks:
@@ -211,7 +321,7 @@ services:
         max-size: "10m"
         max-file: "3"
     deploy:
-      replicas: 2
+      replicas: 1
       placement:
         constraints:
           - node.role == worker

@@ -11,7 +11,7 @@
 # 6. Faz build das imagens customizadas e push para o registry local
 # 7. Deploy do stack usando imagens do registry
 #
-# Uso: ./deploy-swarm.sh [--rebuild] [--sync-github] [--github-frontend URL] [--github-backend URL] [--github-database URL] [--github-branch BRANCH]
+# Uso: ./deploy-swarm.sh [--rebuild] [--sync-github] [--github-frontend URL] [--github-backend URL] [--github-database URL] [--github-consumer URL] [--github-branch BRANCH]
 # =============================================================================
 
 set -euo pipefail
@@ -38,15 +38,40 @@ if [ -f "$SCRIPT_DIR/fix-eol.sh" ]; then
     bash "$SCRIPT_DIR/fix-eol.sh" >/dev/null 2>&1 || true
 fi
 
+# Variaveis sensiveis/por ambiente do consumer (MAIL_TRANSPORT/SES_*/SMTP_*). O arquivo
+# config/.env e opcional e nao e versionado; quando existe, e carregado e
+# exportado para o `docker stack deploy` interpolar o compose.
+# Fica DEPOIS do fix-eol.sh para eventuais CRLF no .env nao contaminarem os valores.
+ENV_FILE="$SCRIPT_DIR/.env"
+if [[ -f "$ENV_FILE" ]]; then
+    # Defesa em profundidade: o arquivo tem SMTP_PASSWORD em texto plano.
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+fi
+
+# Remetente do consumer: o Docker Compose nao suporta interpolacao aninhada
+# (${SES_FROM:-${SMTP_FROM:-}} grava a string literal), entao o fallback e
+# resolvido aqui e exportado. Ordem: MEGUSTA_EMAIL_FROM > SES_FROM > SMTP_FROM.
+# Vazio conta como ausente (:-), evitando remetente "-" quando SES_FROM= existe.
+MEGUSTA_EMAIL_FROM="${MEGUSTA_EMAIL_FROM:-${SES_FROM:-${SMTP_FROM:-}}}"
+export MEGUSTA_EMAIL_FROM
+
 STACK_NAME="megusta"
 COMPOSE_FILE="$SCRIPT_DIR/docker/docker-compose.yml"
 REBUILD=false
 SYNC_GITHUB=false
+# Vira true quando o patch transitorio de e-mail e aplicado: garante rebuild da
+# imagem do consumer mesmo sem --rebuild (senao o registry devolveria a antiga).
+CONSUMER_SOURCE_CHANGED=false
 
 # GitHub Repositories
 GITHUB_FRONTEND_REPO="https://github.com/Miralhaz/me-gusta-frontend.git"
 GITHUB_BACKEND_REPO="https://github.com/Miralhaz/me-gusta-backend.git"
 GITHUB_DATABASE_REPO="https://github.com/Miralhaz/me-gusta-database.git"
+GITHUB_CONSUMER_REPO="https://github.com/Miralhaz/me-gusta-microsservico.git"
 GITHUB_BRANCH="main"
 
 # Local Registry
@@ -59,12 +84,14 @@ SRC_DIR="/opt/megusta/src"
 FRONTEND_SRC_DIR="$SRC_DIR/me-gusta-frontend"
 BACKEND_SRC_DIR="$SRC_DIR/me-gusta-backend"
 DATABASE_SRC_DIR="$SRC_DIR/me-gusta-database"
+CONSUMER_SRC_DIR="$SRC_DIR/me-gusta-microsservico"
 
 # Imagens com registry (redefinidas apos descobrir o MANAGER_IP, mais abaixo)
 FRONTEND_IMAGE=""
 BACKEND_IMAGE=""
 DATABASE_IMAGE=""
 RABBITMQ_IMAGE=""
+CONSUMER_IMAGE=""
 
 # Parse arguments
 for arg in "$@"; do
@@ -89,17 +116,22 @@ for arg in "$@"; do
             GITHUB_DATABASE_REPO="$2"
             shift 2
             ;;
+        --github-consumer)
+            GITHUB_CONSUMER_REPO="$2"
+            shift 2
+            ;;
         --github-branch)
             GITHUB_BRANCH="$2"
             shift 2
             ;;
         --help)
-            echo "Uso: $0 [--rebuild] [--sync-github] [--github-frontend URL] [--github-backend URL] [--github-database URL] [--github-branch BRANCH]"
+            echo "Uso: $0 [--rebuild] [--sync-github] [--github-frontend URL] [--github-backend URL] [--github-database URL] [--github-consumer URL] [--github-branch BRANCH]"
             echo "  --rebuild           Força rebuild das imagens antes do deploy"
             echo "  --sync-github       Clona/atualiza repositórios do GitHub antes do build"
             echo "  --github-frontend   URL do repo frontend (padrão: $GITHUB_FRONTEND_REPO)"
             echo "  --github-backend    URL do repo backend (padrão: $GITHUB_BACKEND_REPO)"
             echo "  --github-database   URL do repo database (padrão: $GITHUB_DATABASE_REPO)"
+            echo "  --github-consumer   URL do repo consumer (padrão: $GITHUB_CONSUMER_REPO)"
             echo "  --github-branch     Branch do GitHub (padrão: $GITHUB_BRANCH)"
             exit 0
             ;;
@@ -273,7 +305,101 @@ sync_github() {
         # Database
         sync_repo "$GITHUB_DATABASE_REPO" "$DATABASE_SRC_DIR" "Database"
         
+        # Consumer (worker de alertas por e-mail)
+        sync_repo "$GITHUB_CONSUMER_REPO" "$CONSUMER_SRC_DIR" "Consumer"
+
         log "Todos os repositórios sincronizados em $SRC_DIR"
+    fi
+}
+
+# =============================================================================
+# VALIDACAO DAS VARIAVEIS DO CONSUMER (E-MAIL)
+# =============================================================================
+# O transporte e escolhido por MAIL_TRANSPORT:
+#   smtp -> [padrao] exige SMTP_HOST/SMTP_FROM e, se SMTP_AUTH=true, usuario/senha.
+#   ses  -> exige SES_FROM (identidade verificada no SES) e SES_REGION valida.
+#           As credenciais vem do LabInstanceProfile das instancias backend e a
+#           role da conta precisa permitir SES (bloqueado no AWS Academy).
+# Validamos antes do build para dar uma mensagem clara e evitar um build longo
+# sem necessidade. As demais variaveis tem default no compose.
+validate_consumer_env() {
+    local missing=()
+    local email_re='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
+    local transport="${MAIL_TRANSPORT:-smtp}"
+    local alerta_to="${ALERTA_EMAIL_TO:-}"
+    local ses_region="${SES_REGION:-us-east-1}"
+    local ses_from="${SES_FROM:-}"
+    local smtp_auth="${SMTP_AUTH:-true}"
+    local smtp_ssl="${SMTP_SSL:-false}"
+    local smtp_port="${SMTP_PORT:-587}"
+    local smtp_from="${SMTP_FROM:-}"
+    local email_from="${MEGUSTA_EMAIL_FROM:-}"
+
+    case "$transport" in
+        ses)
+            [[ -n "$ses_from" ]] || missing+=("SES_FROM")
+            ;;
+        smtp)
+            [[ -n "${SMTP_HOST:-}" ]] || missing+=("SMTP_HOST")
+            [[ -n "$smtp_from" ]] || missing+=("SMTP_FROM")
+            if [[ "$smtp_auth" == "true" ]]; then
+                [[ -n "${SMTP_USERNAME:-}" ]] || missing+=("SMTP_USERNAME")
+                [[ -n "${SMTP_PASSWORD:-}" ]] || missing+=("SMTP_PASSWORD")
+            fi
+            ;;
+        *)
+            error "MAIL_TRANSPORT deve ser 'ses' ou 'smtp'. Valor atual: $transport"
+            exit 1
+            ;;
+    esac
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error "Variaveis obrigatorias do consumer ausentes: ${missing[*]}"
+        error "Crie $ENV_FILE a partir de config/.env.example ou exporte as variaveis antes do deploy."
+        exit 1
+    fi
+
+    if [[ "$transport" == "ses" ]]; then
+        if [[ ! "$ses_from" =~ $email_re ]]; then
+            error "SES_FROM deve ser um e-mail valido (ex.: alertas@seudominio.com). Valor atual: $ses_from"
+            exit 1
+        fi
+        if [[ ! "$ses_region" =~ ^[a-z]{2}-[a-z]+-[0-9]+$ ]]; then
+            error "SES_REGION invalida (ex.: us-east-1). Valor atual: $ses_region"
+            exit 1
+        fi
+    else
+        if [[ ! "$smtp_from" =~ $email_re ]]; then
+            error "SMTP_FROM deve ser um e-mail valido (ex.: alertas@seudominio.com). Valor atual: $smtp_from"
+            exit 1
+        fi
+        if [[ ! "$smtp_port" =~ ^[0-9]+$ ]] || (( smtp_port < 1 || smtp_port > 65535 )); then
+            error "SMTP_PORT deve ser uma porta TCP valida (ex.: 587, 465, 25). Valor atual: $smtp_port"
+            exit 1
+        fi
+        if [[ "$smtp_auth" != "true" && "$smtp_auth" != "false" ]]; then
+            error "SMTP_AUTH deve ser 'true' ou 'false'. Valor atual: $smtp_auth"
+            exit 1
+        fi
+        if [[ "$smtp_ssl" != "true" && "$smtp_ssl" != "false" ]]; then
+            error "SMTP_SSL deve ser 'true' ou 'false'. Valor atual: $smtp_ssl"
+            exit 1
+        fi
+    fi
+
+    if [[ -n "$alerta_to" && ! "$alerta_to" =~ $email_re ]]; then
+        error "ALERTA_EMAIL_TO deve ser um e-mail valido ou vazio. Valor atual: $alerta_to"
+        exit 1
+    fi
+
+    # Remetente efetivo (resolvido acima a partir de SES_FROM/SMTP_FROM). Como o
+    # compose so interpola um nivel, uma falha aqui evita subir com from vazio.
+    if [[ -n "$email_from" && ! "$email_from" =~ $email_re ]]; then
+        error "MEGUSTA_EMAIL_FROM deve ser um e-mail valido. Valor atual: $email_from"
+        exit 1
+    fi
+    if [[ -n "$email_from" ]]; then
+        log "Remetente de e-mail do consumer: $email_from"
     fi
 }
 
@@ -329,6 +455,7 @@ FRONTEND_IMAGE="${MANAGER_IP}:${REGISTRY_PORT}/megusta-frontend:latest"
 BACKEND_IMAGE="${MANAGER_IP}:${REGISTRY_PORT}/megusta-backend:latest"
 DATABASE_IMAGE="${MANAGER_IP}:${REGISTRY_PORT}/megusta-database:latest"
 RABBITMQ_IMAGE="${MANAGER_IP}:${REGISTRY_PORT}/megusta-rabbitmq:latest"
+CONSUMER_IMAGE="${MANAGER_IP}:${REGISTRY_PORT}/megusta-consumer:latest"
 
 # =============================================================================
 # LOCAL REGISTRY - Sobe no manager leader ANTES do build/push
@@ -399,6 +526,9 @@ echo ""
 
 sync_github
 
+# Falha cedo (antes do build) se as credenciais do consumer nao estiverem setadas.
+validate_consumer_env
+
 # =============================================================================
 # BUILD DAS IMAGENS + PUSH PARA REGISTRY LOCAL
 # =============================================================================
@@ -408,20 +538,24 @@ sync_github
 #   - frontend: <repo>/me-gusta-frontend
 #   - backend:  <repo>/megusta
 #   - database: <repo> (raiz; recebe Dockerfile.database + config/ da infra)
+#   - consumer: <repo>/megusta-consumer/megusta-consumer
 if [[ "$SYNC_GITHUB" == true ]]; then
     FRONTEND_BUILD_DIR="$FRONTEND_SRC_DIR/me-gusta-frontend"
     BACKEND_BUILD_DIR="$BACKEND_SRC_DIR/megusta"
     DATABASE_BUILD_DIR="$DATABASE_SRC_DIR"
+    CONSUMER_BUILD_DIR="$CONSUMER_SRC_DIR/megusta-consumer/megusta-consumer"
 else
     FRONTEND_BUILD_DIR="../../me-gusta-frontend/me-gusta-frontend"
     BACKEND_BUILD_DIR="../../me-gusta-backend/megusta"
     DATABASE_BUILD_DIR="../../me-gusta-database"
+    CONSUMER_BUILD_DIR="../../me-gusta-microsservico/megusta-consumer/megusta-consumer"
 fi
 
 log "Diretórios de build:"
 log "  Frontend: $FRONTEND_BUILD_DIR"
 log "  Backend:  $BACKEND_BUILD_DIR"
 log "  Database: $DATABASE_BUILD_DIR"
+log "  Consumer: $CONSUMER_BUILD_DIR"
 
 build_and_push() {
     local build_dir="$1"
@@ -459,21 +593,63 @@ copy_infra_asset() {
     cp "$src" "$dst"
 }
 
-# Copia Dockerfiles/assets da infra para os diretórios de build (subpastas dos repos)
+# =============================================================================
+# PATCH TRANSITORIO DO CONSUMER (WHATSAPP -> E-MAIL)
+# =============================================================================
+# Enquanto o repo me-gusta-microsservico nao recebe o commit oficial de e-mail,
+# aplicamos o patch versionado em config/patches/consumer-email.patch. Se o
+# repo ja estiver migrado (sem WhatsAppService.java), nada e feito. Quando o
+# time commitar, remova o patch e este bloco.
+apply_consumer_email_patch() {
+    local patch="$SCRIPT_DIR/patches/consumer-email.patch"
+    [[ -f "$patch" ]] || return 0
+
+    local repo_dir=""
+    if [[ "$SYNC_GITHUB" == true ]]; then
+        repo_dir="$CONSUMER_SRC_DIR"
+    elif [[ -d "$CONSUMER_BUILD_DIR" ]]; then
+        repo_dir="$(cd "$CONSUMER_BUILD_DIR" && git rev-parse --show-toplevel 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$repo_dir" || ! -d "$repo_dir/.git" ]]; then
+        warn "Repo do consumer nao encontrado; patch de e-mail NAO foi aplicado."
+        return 0
+    fi
+
+    local whatsapp_file="$repo_dir/megusta-consumer/megusta-consumer/src/main/java/school/sptech/consumer/WhatsAppService.java"
+    if [[ ! -f "$whatsapp_file" ]]; then
+        log "Consumer ja esta no molde de e-mail; patch transitorio ignorado."
+        return 0
+    fi
+
+    if git -C "$repo_dir" apply --check "$patch" 2>/dev/null; then
+        git -C "$repo_dir" apply "$patch"
+        CONSUMER_SOURCE_CHANGED=true
+        success "Patch transitorio de e-mail aplicado ao consumer."
+    else
+        error "Falha ao aplicar $patch. Atualize o consumer manualmente antes do deploy."
+        exit 1
+    fi
+}
+
 ensure_dockerfiles() {
-    # Usa o SCRIPT_DIR resolvido no início (o cwd pode ter mudado após o sync).
+    # Copia Dockerfiles/assets da infra para os diretorios de build (subpastas dos repos).
+    # Usa o SCRIPT_DIR resolvido no inicio (o cwd pode ter mudado apos o sync).
     local infra_dir="$SCRIPT_DIR"
     # Copy Dockerfiles from infra to cloned repos
     copy_infra_asset "$infra_dir/docker/frontend.Dockerfile" "$FRONTEND_BUILD_DIR/Dockerfile"
     copy_infra_asset "$infra_dir/docker/nginx.conf" "$FRONTEND_BUILD_DIR/nginx.conf"
     copy_infra_asset "$infra_dir/docker/backend.Dockerfile" "$BACKEND_BUILD_DIR/Dockerfile"
     copy_infra_asset "$infra_dir/docker/Dockerfile.database" "$DATABASE_BUILD_DIR/Dockerfile"
+    copy_infra_asset "$infra_dir/docker/consumer.Dockerfile" "$CONSUMER_BUILD_DIR/Dockerfile"
     # Ensure assets exist in DB build context
     copy_infra_asset "$infra_dir/docker/config/mysql/custom.cnf" "$DATABASE_BUILD_DIR/config/docker/config/mysql/custom.cnf"
     copy_infra_asset "$infra_dir/docker/init-scripts/01-schema.sql" "$DATABASE_BUILD_DIR/config/docker/init-scripts/01-schema.sql"
     copy_infra_asset "$infra_dir/docker/init-scripts/02-seed-data.sql" "$DATABASE_BUILD_DIR/config/docker/init-scripts/02-seed-data.sql"
     copy_infra_asset "$infra_dir/docker/scripts/healthcheck.sh" "$DATABASE_BUILD_DIR/config/docker/scripts/healthcheck.sh"
 }
+
+apply_consumer_email_patch
 
 ensure_dockerfiles
 
@@ -484,13 +660,23 @@ if [[ "$REBUILD" == true ]]; then
     build_and_push "$BACKEND_BUILD_DIR" "$BACKEND_BUILD_DIR/Dockerfile" "$BACKEND_IMAGE"
     build_and_push "$DATABASE_BUILD_DIR" "$DATABASE_BUILD_DIR/Dockerfile" "$DATABASE_IMAGE"
     build_and_push "$SCRIPT_DIR/docker/rabbitmq" "$SCRIPT_DIR/docker/rabbitmq/Dockerfile" "$RABBITMQ_IMAGE"
+    build_and_push "$CONSUMER_BUILD_DIR" "$CONSUMER_BUILD_DIR/Dockerfile" "$CONSUMER_IMAGE"
     
     success "Todas as imagens rebuildadas e enviadas ao registry"
 else
     # Verifica se as imagens existem no registry (tenta pull)
-    for img in "$FRONTEND_IMAGE" "$BACKEND_IMAGE" "$DATABASE_IMAGE" "$RABBITMQ_IMAGE"; do
-        if ! docker pull "$img" >/dev/null 2>&1; then
-            warn "Imagem $img não encontrada no registry, fazendo build e push..."
+    for img in "$FRONTEND_IMAGE" "$BACKEND_IMAGE" "$DATABASE_IMAGE" "$RABBITMQ_IMAGE" "$CONSUMER_IMAGE"; do
+        force_build=false
+        if [[ "$img" == "$CONSUMER_IMAGE" && "$CONSUMER_SOURCE_CHANGED" == true ]]; then
+            # Codigo do consumer mudou (patch de e-mail): a imagem do registry
+            # esta desatualizada, entao rebuilda independente do --rebuild.
+            warn "Consumer foi alterado (patch de e-mail); rebuildando a imagem..."
+            force_build=true
+        fi
+        if [[ "$force_build" == true ]] || ! docker pull "$img" >/dev/null 2>&1; then
+            if [[ "$force_build" != true ]]; then
+                warn "Imagem $img não encontrada no registry, fazendo build e push..."
+            fi
             case $img in
                 "$FRONTEND_IMAGE")
                     build_and_push "$FRONTEND_BUILD_DIR" "$FRONTEND_BUILD_DIR/Dockerfile" "$FRONTEND_IMAGE" "--build-arg VITE_API_URL=/api"
@@ -503,6 +689,9 @@ else
                     ;;
                 "$RABBITMQ_IMAGE")
                     build_and_push "$SCRIPT_DIR/docker/rabbitmq" "$SCRIPT_DIR/docker/rabbitmq/Dockerfile" "$RABBITMQ_IMAGE"
+                    ;;
+                "$CONSUMER_IMAGE")
+                    build_and_push "$CONSUMER_BUILD_DIR" "$CONSUMER_BUILD_DIR/Dockerfile" "$CONSUMER_IMAGE"
                     ;;
             esac
         else
@@ -524,6 +713,7 @@ sed \
     -e "s|image: megusta-backend:latest|image: $BACKEND_IMAGE|" \
     -e "s|image: megusta-database:latest|image: $DATABASE_IMAGE|" \
     -e "s|image: megusta-rabbitmq:latest|image: $RABBITMQ_IMAGE|" \
+    -e "s|image: megusta-consumer:latest|image: $CONSUMER_IMAGE|" \
     "$COMPOSE_FILE" > "$TEMP_COMPOSE"
 
 # =============================================================================
@@ -586,6 +776,7 @@ log "  Frontend:  http://<ALB-DNS> (porta 80 via ALB)"
 log "  Backend:   http://backend:8080 (interno)"
 log "  Database:  mysql://database:3306 (interno)"
 log "  RabbitMQ:  http://rabbitmq:15672 (admin/admin)"
+log "  Consumer:  worker de alertas por e-mail (SES ou SMTP, sem porta exposta)"
 log "  Registry:  http://$MANAGER_IP:$REGISTRY_PORT/v2/_catalog"
 
 echo ""
