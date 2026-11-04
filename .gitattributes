@@ -38,6 +38,8 @@ Dockerfile.*  text eol=lf
 *.py          text eol=lf
 *.md          text eol=lf
 *.properties  text eol=lf
+# Patches aplicados com `git apply` no bastion (CRLF quebra o patch)
+*.patch       text eol=lf
 
 # Chaves SSH sao arquivos de TEXTO (nao binarios!)
 *.pub  text eol=lf

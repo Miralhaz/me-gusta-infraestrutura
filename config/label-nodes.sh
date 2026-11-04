@@ -84,5 +84,6 @@ success "Labels configuradas. O scheduler do Swarm agora usará estas labels par
 log "Constraints no docker-compose.yml:"
 log "  - frontend: node.role == worker + spread node.labels.az"
 log "  - backend:  node.role == worker + spread node.labels.az"
+log "  - consumer: node.labels.role == backend + spread node.labels.az"
 log "  - database: node.labels.role == database (single instance on database-a)"
-log "  - rabbitmq: node.role == worker + spread node.labels.az"
+log "  - rabbitmq: node.role == worker (1 broker unico; ver nota no compose)"

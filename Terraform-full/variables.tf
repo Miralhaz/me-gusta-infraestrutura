@@ -187,3 +187,23 @@ variable "lambda_log_retention_days" {
   type        = number
   default     = 14
 }
+
+# =============================================================================
+# SES - alertas por e-mail
+# =============================================================================
+variable "enable_ses_email_identity" {
+  description = "Cria as identidades SES do var.ses_email_identities. Deixe false no AWS Academy, cuja role bloqueia ses:CreateEmailIdentity/GetEmailIdentity; use MAIL_TRANSPORT=smtp ou sns."
+  type        = bool
+  default     = false
+}
+
+variable "ses_email_identities" {
+  description = "E-mails verificados no SES. No sandbox o remetente e os destinatarios de teste precisam estar nesta lista."
+  type        = set(string)
+  default     = ["henry.silva@sptech.school"]
+
+  validation {
+    condition     = alltrue([for email in var.ses_email_identities : can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", email))])
+    error_message = "Todos os valores de ses_email_identities devem ser enderecos de e-mail validos."
+  }
+}
