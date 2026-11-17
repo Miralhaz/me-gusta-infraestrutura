@@ -11,6 +11,7 @@
 ```
 config/
 ├── README.md                    # Este arquivo
+├── README-glue-athena.md        # Data Lake: Glue (crawlers/jobs), Lambda de export e Athena
 ├── deploy-swarm.sh             # Script principal de deploy (executa no bastion-a)
 ├── join-swarm.sh               # Script para juntar nós ao Swarm (executa em cada nó)
 ├── label-nodes.sh              # Script para labelar nós (executa no bastion-a)
@@ -18,6 +19,10 @@ config/
 ├── .env.example                # Modelo das variáveis do consumer (SES/SMTP)
 ├── patches/
 │   └── consumer-email.patch    # Patch transitório do consumer (WhatsApp → e-mail)
+├── loadtest/
+│   ├── README.md               # Teste de carga (JMeter) e critérios de aceite
+│   ├── jmx/megusta-carga.jmx   # Plano com navegação, cadastro e sondas
+│   └── scripts/                # Gerar CSV, executar, analisar e limpar usuários
 ├── docker/
 │   ├── docker-compose.yml      # Stack principal do Swarm
 │   ├── Dockerfile.database     # Imagem customizada MySQL (repo do banco NÃO tem Dockerfile)
@@ -311,6 +316,24 @@ echo "http://${ALB_DNS}"
 
 Abra `http://${ALB_DNS}` no navegador. O ALB faz health check em `/health` nas
 instâncias **web-a** e **web-b** — ambos os targets devem ficar `healthy`.
+
+### Teste de carga (Comp. Nuvem)
+
+O plano JMeter e os scripts de apoio ficam em **`loadtest/`**. Ele exercita o
+caminho real `ALB → nginx → backend → MySQL` com navegação, cadastro de usuários
+e sondas de `/health`:
+
+```bash
+# O ALB_DNS e obtido na SUA maquina (tofu output) ou no console AWS.
+cd ~/config/loadtest
+chmod +x scripts/*.sh
+./scripts/rodar-carga.sh --host <ALB_DNS>
+```
+
+O script valida `/health` antes de começar, gera e-mails únicos, produz JTL +
+dashboard HTML e imprime o resumo de latência/erros. Pré-requisitos, evidências
+(acesso ao HTML por túnel SSH), critérios de aceite e limpeza do banco estão em
+**`loadtest/README.md`**.
 
 ---
 
@@ -631,76 +654,75 @@ O `exchange`/`routing key` continuam iguais (`megusta.estoque` /
 `alerta.estoque`).
 
 **Consumer (`me-gusta-microsservico/megusta-consumer/megusta-consumer`)** — a
-versão de e-mail (que está em `config/patches/consumer-email.patch`, seção 10)
-faz o seguinte:
+versão de e-mail **já está commitada no repositório** (não depende mais do patch
+da seção 10). O contrato atual é:
 
-```xml
-<!-- pom.xml -->
-<dependency>
-  <groupId>org.springframework.boot</groupId>
-  <artifactId>spring-boot-starter-mail</artifactId>
-</dependency>
-<dependency>
-  <groupId>software.amazon.awssdk</groupId>
-  <artifactId>sesv2</artifactId>
-</dependency>
-<!-- versão controlada pelo BOM software.amazon.awssdk:bom -->
+```text
+exchange   megusta.estoque        (TopicExchange durável, declarado pelo consumer)
+routing    alerta.estoque
+fila       megusta.email.alertas  (durável)
+DLX/DLQ    megusta.email.alertas.dlx / megusta.email.alertas.dlq
 ```
 
-```properties
-# src/main/resources/application.properties
-megusta.email.transport=${MAIL_TRANSPORT:smtp}
-megusta.email.ses-region=${SES_REGION:us-east-1}
-megusta.email.from=${SES_FROM:${SMTP_FROM:}}
-megusta.email.override-to=${ALERTA_EMAIL_TO:}
+O `RabbitConfig` declara o exchange, a fila, o binding e a DLQ no startup. **Se o
+consumer não sobe, a topologia não é criada** e um `POST` na API de publicação do
+RabbitMQ responde **404** (`no exchange 'megusta.estoque' in vhost '/'`). O backend
+também declara o exchange, mas a conexão AMQP dele é preguiçosa (só abre no
+primeiro publish), então não conte com isso para criar a topologia no boot.
 
-spring.mail.host=${SMTP_HOST:}
-spring.mail.port=${SMTP_PORT:587}
-spring.mail.username=${SMTP_USERNAME:}
-spring.mail.password=${SMTP_PASSWORD:}
-spring.mail.default-encoding=UTF-8
-spring.mail.properties.mail.smtp.auth=${SMTP_AUTH:true}
-spring.mail.properties.mail.smtp.starttls.enable=${SMTP_STARTTLS:true}
-spring.mail.properties.mail.smtp.starttls.required=${SMTP_STARTTLS:true}
-spring.mail.properties.mail.smtp.ssl.enable=${SMTP_SSL:false}
-spring.mail.properties.mail.smtp.connectiontimeout=10000
-spring.mail.properties.mail.smtp.timeout=10000
-spring.mail.properties.mail.smtp.writetimeout=10000
+O consumer lê **`MAIL_*`** (`MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`,
+`MAIL_PASSWORD`, `MAIL_FROM`) — não `SMTP_*`. O `config/.env` usa `SMTP_*` /
+`MEGUSTA_EMAIL_FROM`, portanto **o mapeamento é responsabilidade da infra** e já
+está explícito no `docker-compose.yml`:
+
+```yaml
+# docker-compose.yml (serviço consumer)
+- MAIL_HOST=${SMTP_HOST:-}
+- MAIL_PORT=${SMTP_PORT:-587}
+- MAIL_USERNAME=${SMTP_USERNAME:-}
+- MAIL_PASSWORD=${SMTP_PASSWORD:-}
+- MAIL_FROM=${MEGUSTA_EMAIL_FROM:-}
+- SMTP_HOST=${SMTP_HOST:-}
+# ...
 ```
 
-> No stack, a variável de ambiente `MEGUSTA_EMAIL_FROM` (definida no
-> `docker-compose.yml` com o valor já resolvido pelo `deploy-swarm.sh`) tem
-> precedência sobre `megusta.email.from` do `application.properties`. A
-> propriedade abaixo é só o fallback para execução local sem o compose; não
-> dependa dela no cluster.
+> O `deploy-swarm.sh` resolve `MEGUSTA_EMAIL_FROM` (`SES_FROM` > `SMTP_FROM`)
+> antes do deploy, então `MAIL_FROM` chega preenchido ao container. **Nenhuma
+> alteração no código do consumer é necessária**: a imagem commitada passa a
+> subir apenas por causa deste mapeamento no compose.
 
-```java
-// EmailService.java (substitui o WhatsAppService)
-@Service
-public class EmailService {
-  public String enviar(String destinatario, String resumo) {
-    String to = overrideTo.isBlank() ? destinatario : overrideTo;
-    // valida o e-mail (regex) e envia:
-    //   MAIL_TRANSPORT=ses  -> SesV2Client.sendEmail(...) com credenciais padrão
-    //   MAIL_TRANSPORT=smtp -> JavaMailSender.send(SimpleMailMessage)
-    return to;
-  }
-}
+Depois do deploy, confirme que a topologia voltou a existir:
+
+```bash
+docker service ls --filter name=megusta_consumer      # 2/2
+docker service logs megusta_consumer --tail 50        # sem "Configure MAIL_HOST"
+docker service logs megusta_consumer --tail 50 | grep -i 'Created new connection\|queue'
 ```
+
+Um publish de teste em `megusta.estoque` (`alerta.estoque`) deve responder
+`routed: true`; `404 no exchange` significa que o consumer ainda não subiu.
+
+> O consumer **commitado hoje é SMTP-only**: `EmailService` usa `JavaMailSender`
+> e `MailConfigurationValidator` falha rápido se host/porta/usuário/senha/from
+> estiverem vazios. `MAIL_TRANSPORT=ses` e `ALERTA_EMAIL_TO` continuam no
+> `.env`/compose por compatibilidade com o patch antigo, mas não são lidos por
+> esta versão. Para usar SES, é preciso reintroduzir o transporte SES no
+> `EmailService` (o patch da seção 10 tem a implementação de referência).
 
 ```java
 // AlertaEstoqueConsumer.java
 @RabbitListener(queues = "${megusta.rabbitmq.queue}")
 public void consumir(Message message) throws Exception {
   AlertaEstoqueMensagem dto = mapper.readValue(message.getBody(), AlertaEstoqueMensagem.class);
-  String to = email.enviar(dto.email(), MensagemFormatter.resumo(dto));  // antes: whatsapp.enviar(...)
-  log.info("Alerta de estoque enviado por e-mail para {}", to);
+  String destinatario = MensagemFormatter.email(dto.email());
+  emailService.enviar(destinatario, MensagemFormatter.resumo(dto));
+  log.info("E-mail de alerta de estoque aceito para {}.", destinatario);
 }
 ```
 
-Ajustes que acompanham: o record `AlertaEstoqueMensagem` do consumer passa a ter
-`String email`; `MensagemFormatter.telefone()` é removido; o arquivo
-`exemplo-mensagem.json` passa a usar `"email"` no lugar de `"telefone"`.
+Ajustes que acompanham: o record `AlertaEstoqueMensagem` do consumer tem
+`String email`; `MensagemFormatter.telefone()` foi removido; o arquivo
+`exemplo-mensagem.json` usa `"email"` no lugar de `"telefone"`.
 
 ### 10. Patch transitório do consumer (WhatsApp → e-mail)
 
@@ -735,6 +757,36 @@ receberia uma cópia de cada alerta):
 2. **Exchanges** → delete `megusta.whatsapp.alertas.dlx`.
 
 Nada mais usa esses nomes depois da migração.
+
+---
+
+## 🗄️ Data Lake (Glue e Athena)
+
+A camada analítica é provisionada pelo `Terraform-full` e é **independente** do Swarm:
+ela lê os dados via API REST e via Fluent Bit, grava nos buckets S3 e é consultada no
+Athena.
+
+Resumo do que existe hoje:
+
+| Peça | Nome | Agendamento |
+|---|---|---|
+| Lambda de export (API → raw) | `megusta-export-estoque` | diário, `cron(0 3 * * ? *)` UTC |
+| Glue Catalog DB | `megusta_datalake` | — |
+| Crawlers | `megusta-raw-crawler` (06:00), `megusta-trusted-crawler` (08:00), `megusta-curated-crawler` (10:00), `megusta-logs-crawler` (a cada 6 h) | UTC |
+| Jobs Glue | `megusta-raw-to-trusted`, `megusta-trusted-to-curated`, `megusta-logs-bronze-to-silver` | **manual** (sem trigger) |
+| Athena | workgroup `megusta-analytics`, resultados em `s3://megusta-curated-us-east-1/athena-results/` | — |
+
+Ordem do pipeline: `Lambda → raw → raw-to-trusted → trusted → trusted-to-curated → curated → Athena`.
+Os logs seguem outro ramo: `Fluent Bit → raw/logs → logs-bronze-to-silver → trusted/logs → Athena`.
+
+> **Documentação completa** (inventário, layout S3, variáveis, comandos de execução,
+> consultas prontas e divergências conhecidas):
+> [`README-glue-athena.md`](./README-glue-athena.md).
+>
+> ⚠️ Os jobs Glue **não têm trigger**: precisam ser disparados com
+> `aws glue start-job-run`. E a Lambda grava em `raw/megusta/<recurso>/`, enquanto o
+> job `raw-to-trusted` lê `raw/project-data/` — os CSVs de estoque hoje **não** entram
+> em `project_data_trusted`. Detalhes na seção 12 daquele documento.
 
 ---
 
@@ -817,7 +869,7 @@ Os scripts e Dockerfiles deste diretório são feitos para rodar no **Linux**. S
 
 ### Como resolver
 
-O `fix-eol.sh` normaliza **todos** os arquivos de texto (scripts, Dockerfiles, `.cnf`, `.conf`, `.sql`, `.yml`, `.tf`, `.tpl`, `.json`, `.py`) para LF. É idempotente:
+O `fix-eol.sh` normaliza **todos** os arquivos de texto (scripts, Dockerfiles, `.cnf`, `.conf`, `.sql`, `.yml`, `.tf`, `.tpl`, `.json`, `.py`, `.jmx`) para LF. É idempotente:
 
 ```bash
 # No bastion-a, dentro de /home/ubuntu/config:

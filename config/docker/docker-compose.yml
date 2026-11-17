@@ -167,6 +167,15 @@ services:
       - RABBITMQ_QUEUE=megusta.email.alertas
       # --- Transporte de e-mail ---
       - MAIL_TRANSPORT=${MAIL_TRANSPORT:-smtp}
+      # Contrato do consumer versionado em me-gusta-microsservico: ele le
+      # MAIL_HOST/MAIL_PORT/MAIL_USERNAME/MAIL_PASSWORD/MAIL_FROM, enquanto o
+      # config/.env usa SMTP_*. O mapeamento abaixo evita 404 no exchange
+      # causado pelo consumer nao subir (ele declara exchange/fila/binding).
+      - MAIL_HOST=${SMTP_HOST:-}
+      - MAIL_PORT=${SMTP_PORT:-587}
+      - MAIL_USERNAME=${SMTP_USERNAME:-}
+      - MAIL_PASSWORD=${SMTP_PASSWORD:-}
+      - MAIL_FROM=${MEGUSTA_EMAIL_FROM:-}
       # SES API (opcional; credenciais vem do instance profile, nao use chaves no .env)
       - SES_REGION=${SES_REGION:-us-east-1}
       # Remetente resolvido pelo deploy-swarm.sh (SES_FROM > SMTP_FROM). O Docker

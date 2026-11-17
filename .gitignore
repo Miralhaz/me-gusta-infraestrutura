@@ -21,6 +21,9 @@ __pycache__/
 .venv/
 venv/
 
+# Teste de carga - resultados locais (JTL, HTML, CSV gerado)
+config/loadtest/resultados/
+
 # Terraform - artefatos de build (zip da Lambda)
 Terraform-full/build/
 build/*.zip
