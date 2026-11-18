@@ -46,6 +46,7 @@ mapfile -t files < <(find . -type f \
      -o -name '.env' \
      -o -name '.env.*' \
      -o -name '*.py' \
+     -o -name '*.jmx' \
   \) -not -path './.git/*')
 
 if [ ${#files[@]} -eq 0 ]; then
